@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (Supabase project `trash-map` created, migrated, and seeded; app connection blocked on the secret key; branch `feat/ai-classification`, based on `feat/reports-api`).
+> Last updated: 2026-10-11 (Supabase `trash-map` live: reads and writes verified through the API; branch `feat/ai-classification`, based on `feat/reports-api`).
 
 ## Rules for every coding session
 
@@ -136,23 +136,23 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | Project scaffold (Next.js, TS strict, Tailwind, ESLint, shadcn) | Tested | `npm run check` and `npm run build` pass; `/` returns 200 under `next start`. |
 | Shared contracts (Zod schemas + types) | Tested | Covered by `tests/validation/reports.test.ts`. |
 | Env validation + `/api/health` | Tested | With no `.env.local`, `/api/health` returned `{"ok":true,"configured":{"supabase":false,"gemini":false}}`. |
-| `GET /api/reports` (list, filters, pagination) | Tested (mocked DB only) | Unit tests with a fake Supabase client, plus smoke tests against `next start` for 400/503/500 paths. **Never run against a real Supabase database.** |
-| `PATCH /api/reports/[id]` (status + `resolved_at`) | Tested (mocked DB only) | Same as above. Real PostgREST behavior of `.neq().maybeSingle()` on update is unverified. |
+| `GET /api/reports` (list, filters, pagination) | **Tested (live)** | Unit tests with a fake client, plus live checks against `trash-map`: counts, filters, combined filters, pagination, and ordering. |
+| `PATCH /api/reports/[id]` (status + `resolved_at`) | **Tested (live)** | Live: resolve sets `resolved_at`, re-resolve keeps it (the `.neq().maybeSingle()` path works on real PostgREST), other statuses clear it, unknown UUID gives 404 on both paths. |
 | Supabase migration (`reports` table, `report-images` bucket) | **Applied** | Applied to project `trash-map` on 2026-10-11 and verified by catalog queries (section F). |
 | Seed data (25 sample reports) | **Applied** | 25 rows in `trash-map` (17 pending, 4 in progress, 4 resolved), all `is_sample` and `[SAMPLE]`. |
-| App ↔ Supabase connection | **Blocked** | `.env.local` has the URL but not a valid `SUPABASE_SERVICE_ROLE_KEY` (a publishable key was pasted, and the app now rejects it). No live API read/write test has run. |
+| App ↔ Supabase connection | **Tested (live)** | Legacy `service_role` key for `trash-map` in `.env.local`. 22 live API checks passed on 2026-10-11 (section J); the dashboard shows "Live data" with 25 reports. |
 | 1. Photo upload | Not started | |
 | 2. Location selection / geolocation | Not started | |
 | 3. Gemma classification (`POST /api/classify`) | **Tested (live)** | 49 mocked unit tests, plus 5 real classifications with `gemma-4-26b-a4b-it` on 2026-10-11 that returned the expected outcomes (section J). Not yet wired into report creation. |
 | Classify test panel (UI) | Tested | "Classify a photo" panel on the dashboard, between the summary and the map. Unit tests for `classify-client.ts`; verified in a browser against the live model (section J). |
 | 4. Classification schema validation | **Tested (live)** | All 5 real model outputs passed Zod validation and mapped to valid `ClassifyResponse` shapes. |
-| 5. Save report + image to Supabase | Not started | Schema and bucket exist. Needs the secret key for live testing. |
+| 5. Save report + image to Supabase | Not started | Schema, bucket, and a working service-role connection exist. Next milestone. |
 | Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
 | 6. Map with report markers | Not started | Placeholder section on the dashboard. Data source `GET /api/reports` is ready (mocked-DB tested). |
 | 7. Density heat map | Not started | |
 | 8. Delay-weighted heat for unresolved reports | Not started | Proposed formula in section H. |
 | 9. Complaint drafts | Not started | Contract defined. |
-| 10. Mark as resolved | Implemented | Backend `PATCH /api/reports/[id]` plus per-card status buttons in the dashboard. Not yet run against the real database through the API (blocked on the secret key). |
+| 10. Mark as resolved | Implemented | Backend `PATCH /api/reports/[id]` plus per-card status buttons in the dashboard. Verified live against `trash-map` through the API. |
 | 11. Sample data | Implemented | See seed row above. |
 
 ## E. Shared contracts
@@ -337,7 +337,7 @@ Schema details:
     - Deleting a report must also delete its object.
     - Listing the bucket is **not** possible without a storage SELECT policy, and there are none.
   - If photos need to become private later, switch the bucket to private, store the object path, and have the API return short-lived signed URLs. That changes `image_url` semantics, so coordinate it with Aashish.
-  - Status: the bucket exists. No upload has been tested, because the secret key is missing and `POST /api/reports` isn't built.
+  - Status: the bucket exists. No upload has been tested yet, because `POST /api/reports` isn't built.
 
 `supabase/seed.sql`: 25 rows across Mumbai with `is_sample = true` and descriptions prefixed `[SAMPLE]`. It has a mix of statuses and ages from 1 to 30 days. Re-runnable, because it deletes only `is_sample` rows first.
 
@@ -360,11 +360,11 @@ Variables (see `.env.example`; real values go in `.env.local`, which git ignores
 
 Scripts: `dev`, `build`, `start`, `lint`, `typecheck` (`next typegen && tsc --noEmit`), `test` (`vitest run`), `test:watch`, `check` (lint + typecheck + test). Requires Node ≥ 20.9; developed on Node 24.19 and npm 11.17.
 
-Local Supabase configuration (Tejas's machine, 2026-10-11): `.env.local` has `NEXT_PUBLIC_SUPABASE_URL` (the trash-map URL) and `SUPABASE_STORAGE_BUCKET=report-images`.
-- **`SUPABASE_SERVICE_ROLE_KEY` is not valid yet:** the value saved is a publishable key, so `/api/health` reports `supabase: false` and the dashboard stays in demo mode.
-- The connector can't reveal secret keys. Get one from the Dashboard: trash-map → Project Settings → API Keys → **Secret keys** (`sb_secret_…`; reveal or copy it, or "Add new secret key"), or Legacy API keys → **service_role**. Paste it into `.env.local` in an editor, never in chat or the terminal.
+Local Supabase configuration (Tejas's machine, 2026-10-11): `.env.local` (git-ignored) has `NEXT_PUBLIC_SUPABASE_URL` (the trash-map URL), `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_STORAGE_BUCKET=report-images`.
+- The key is the legacy `service_role` JWT for ref `olohsrjldukoatxxptds`, checked by decoding its role and ref without printing it. `/api/health` reports `supabase: true`.
+- Other machines or deployments need the key from the Dashboard: trash-map → Project Settings → API Keys → **Secret keys** (`sb_secret_…`) or Legacy API keys → **service_role**. Never use the publishable or anon key.
 
-Configuration gaps: the Supabase secret key (above).
+Configuration gaps: none for local development.
 
 Local Gemini configuration (Tejas's machine, 2026-10-11): `.env.local` (git-ignored, never committed) holds a valid `GEMINI_API_KEY` and `GEMINI_MODEL=gemma-4-26b-a4b-it`. `/api/health` reports `gemini: true`. Any other machine or deployment needs its own key in its own env.
 - Model choice: Google's "Run Gemma with the Gemini API" page (ai.google.dev/gemma/docs/core/gemma_on_gemini_api, checked 2026-10-11) lists exactly two Gemma models on the Gemini API, `gemma-4-26b-a4b-it` and `gemma-4-31b-it`. Both take text and image input. `26b-a4b` is a mixture-of-experts model (about 4B active parameters), so it should be faster.
@@ -434,6 +434,20 @@ Integration rules:
 - Work on feature branches and open small PRs into `main`.
 
 ## J. Testing and known issues
+
+**Live Supabase verification (2026-10-11): succeeded.** Run against `next dev` with the real `service_role` key and project `trash-map`, using an ad-hoc script (`/tmp/tm-live-db.mjs`, not committed). All **22 checks passed**:
+- Reads:
+  - `GET /api/reports` returned 25 rows with `has_more: false`, all `is_sample` and `[SAMPLE]`, ordered newest first.
+  - `status=resolved` returned 4, all with `resolved_at`. `status=pending` returned 17, all with `resolved_at: null`. `category=construction` returned 4. `status=pending&category=plastic` returned 5, all matching.
+  - `limit=10` gave `has_more: true`. `limit=10&offset=20` returned 5 with `has_more: false`. The three pages covered all 25 ids with no overlap. `limit=0` gave 400.
+- Writes, on one sample row only: `3f275c1b-7c05-4800-ae45-0a14be8b22e5` ("[SAMPLE] Garden waste on a Chembur street corner", originally pending).
+  - PATCH `resolved` set `resolved_at` to `2026-10-11T09:07:30.183+00:00`. A second PATCH `resolved` 1.5 s later returned the **same** `resolved_at`.
+  - PATCH `in_progress` cleared `resolved_at`. PATCH `pending` restored the original state, and all other fields were unchanged.
+  - An unknown UUID gave 404 `NOT_FOUND` on both the resolve and non-resolve paths. An invalid id and an invalid status each gave 400.
+- Confirmed independently by SQL through the connector afterwards: 17 pending, 4 in progress, 4 resolved; the test row is `pending` with `resolved_at` null; 0 non-sample rows.
+- Error safety: `next start` with `NEXT_PUBLIC_SUPABASE_URL` overridden to a non-existent host returned 500 `DATABASE_ERROR` "Database request failed" for GET (after about 7.1 s of supabase-js retries) and for PATCH. The body contained neither the key, the host, nor a stack trace. The server logged `DatabaseError: Failed to list reports` and `Failed to resolve report`.
+- Dashboard (`next dev`, page snapshot): "Data source: Live data", "Counts cover the 25 loaded reports", with the 25 Supabase rows listed.
+- Not exercised live: storage uploads, which need `POST /api/reports`.
 
 Supabase setup (2026-10-11, branch `feat/ai-classification`):
 - **Done through the Supabase connector:**
@@ -584,7 +598,7 @@ Remaining UI work for Aashish (start with `src/components/reports/reports-dashbo
 - Report submission form (feature 1–2 UI) once `POST /api/reports` exists.
 
 Next, in priority order:
-1. **(Tejas) Supabase live.** The project, migration, and seed are done. **Blocked only on the secret key** in `.env.local` (section G). Then verify:
+1. ~~(Tejas) Supabase live~~ **Done 2026-10-11:** every check below passed (section J). Kept for re-verification on other machines:
    - `curl /api/health` shows `supabase: true`.
    - `curl /api/reports` returns 25 sample rows with `has_more: false`.
    - `?status=resolved` returns 4 rows, `?category=construction` returns 4, and `?limit=10&offset=20` returns 5 with `has_more: false`.
@@ -605,6 +619,12 @@ Next, in priority order:
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · Live Supabase verification
+- **Summary:** with the `trash-map` `service_role` key in `.env.local`, the reports API ran against the real database. 22 checks passed: reads, filters, pagination, the resolve, re-resolve, and reopen cycle on one sample row (restored to pending), 404 and 400 cases, and safe 500s on database failure. The dashboard shows live data.
+- **Contract impact:** none. No code changes.
+- **Files:** `PROJECT_CONTEXT.md`. `.env.local` is local only.
+- **Remaining:** `POST /api/reports` (upload, classify, insert), including the first live storage upload.
 
 ### 2026-10-11 · Supabase project, migration, and seed
 - **Summary:**
