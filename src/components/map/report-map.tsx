@@ -5,6 +5,7 @@ import { useState } from "react";
 import type { Place } from "@/lib/geocode";
 import { HEAT_LEVELS, HEAT_MODE_HINTS, HEAT_MODE_LABELS, isValidCoordinate, type HeatMode } from "@/lib/heat-map";
 import type { Report } from "@/types/reports";
+import type { PickedLocation } from "@/components/reports/report-form";
 import { MapSearch } from "./map-search";
 import type { MapFocus } from "./report-heat-map";
 
@@ -19,12 +20,14 @@ type Props = {
   reports: Report[];
   state: "loading" | "ready" | "error";
   demo: boolean;
+  picked: PickedLocation | null;
+  onPick: (location: PickedLocation) => void;
 };
 
 const MODES = Object.keys(HEAT_MODE_LABELS) as HeatMode[];
 const GRADIENT_CSS = `linear-gradient(to right, ${HEAT_LEVELS.map((level) => level.color).join(", ")})`;
 
-export function ReportMap({ reports, state, demo }: Props) {
+export function ReportMap({ reports, state, demo, picked, onPick }: Props) {
   const [mode, setMode] = useState<HeatMode>("density");
   const [focus, setFocus] = useState<MapFocus | null>(null);
 
@@ -53,11 +56,22 @@ export function ReportMap({ reports, state, demo }: Props) {
         <h2 id="map-heading" className="text-lg font-medium">
           Map
         </h2>
-        <MapSearch onSelect={(place: Place) => setFocus((prev) => ({ place, key: (prev?.key ?? 0) + 1 }))} />
+        <MapSearch
+          onSelect={(place: Place) => {
+            setFocus((prev) => ({ place, key: (prev?.key ?? 0) + 1 }));
+            onPick({ latitude: place.latitude, longitude: place.longitude, label: place.name });
+          }}
+        />
       </div>
 
       <div className="relative h-72 overflow-hidden rounded-lg border bg-muted/40 sm:h-96">
-        <ReportHeatMap reports={state === "ready" ? reports : []} mode={mode} focus={focus} />
+        <ReportHeatMap
+          reports={state === "ready" ? reports : []}
+          mode={mode}
+          focus={focus}
+          picked={picked}
+          onPick={onPick}
+        />
         {overlay && (
           <p
             role="status"
@@ -97,7 +111,8 @@ export function ReportMap({ reports, state, demo }: Props) {
       <p className="text-xs text-muted-foreground">
         {HEAT_MODE_HINTS[mode]} The map shows the reports loaded below, including their filters.{" "}
         {demo && "These are demo reports, not real submissions. "}
-        Dots mark individual reports: red pending, amber in progress, green resolved.
+        Dots mark individual reports: red pending, amber in progress, green resolved. Click a dot for details, or
+        click anywhere else to set the location for a new report.
       </p>
     </section>
   );

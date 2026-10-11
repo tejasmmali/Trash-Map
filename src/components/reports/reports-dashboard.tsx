@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ClassifyPanel } from "@/components/classify/classify-panel";
 import { ReportMap } from "@/components/map/report-map";
 import { Button } from "@/components/ui/button";
 import { DEMO_REPORTS } from "@/lib/demo-reports";
@@ -16,6 +15,7 @@ import {
 } from "@/lib/reports-client";
 import type { Report, ReportStatus } from "@/types/reports";
 import { ReportFilters } from "./report-filters";
+import { ReportForm, type PickedLocation } from "./report-form";
 import { ReportList } from "./report-list";
 import { ReportSummary } from "./report-summary";
 
@@ -32,6 +32,7 @@ export function ReportsDashboard() {
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [updatingIds, setUpdatingIds] = useState<ReadonlySet<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [pickedLocation, setPickedLocation] = useState<PickedLocation | null>(null);
   const inFlight = useRef(new Set<string>());
 
   // Changing filters or pressing refresh produces a new key, which restarts
@@ -101,6 +102,20 @@ export function ReportsDashboard() {
     });
   }
 
+  function addCreatedReport(report: Report) {
+    // A new report is pending and newest, so it may not match the active
+    // filters; clearing them reloads a list that includes it.
+    if (filterReports([report], filters).length === 0) {
+      changeFilters({});
+      return;
+    }
+    setResult((prev) =>
+      prev?.kind === "ok" && !prev.reports.some((item) => item.id === report.id)
+        ? { ...prev, reports: [report, ...prev.reports] }
+        : prev,
+    );
+  }
+
   async function changeStatus(report: Report, status: ReportStatus) {
     if (inFlight.current.has(report.id)) return;
 
@@ -163,12 +178,14 @@ export function ReportsDashboard() {
         note={summaryNote(mode, reports.length, filtered, hasMore)}
       />
 
-      <ClassifyPanel />
+      <ReportForm location={pickedLocation} onLocationChange={setPickedLocation} onCreated={addCreatedReport} />
 
       <ReportMap
         reports={reports}
         state={mode === "error" ? "error" : mode === "loading" ? "loading" : "ready"}
         demo={mode === "demo"}
+        picked={pickedLocation}
+        onPick={setPickedLocation}
       />
 
       <section aria-labelledby="reports-heading" aria-busy={loading} className="flex flex-col gap-4">

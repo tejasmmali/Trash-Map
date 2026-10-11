@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEMO_REPORTS } from "@/lib/demo-reports";
 import {
   applyDemoStatus,
+  createReport,
   fetchReports,
   filterReports,
   summarizeReports,
@@ -169,5 +170,68 @@ describe("DEMO_REPORTS", () => {
       expect(report.is_sample).toBe(true);
       expect(report.description).toMatch(/^\[SAMPLE\]/);
     }
+  });
+});
+
+describe("createReport", () => {
+  const image = new File([new Uint8Array([0xff, 0xd8, 0xff, 0xe0])], "photo.jpg", { type: "image/jpeg" });
+  const input = { image, latitude: 19.0178, longitude: 72.8478, description: "  Near the bus stop " };
+
+  it("sends only the photo, coordinates, and trimmed description as multipart", async () => {
+    const fetchMock = mockFetch(201, { report: reportRow() });
+
+    const result = await createReport(input);
+
+    expect(result).toEqual({ kind: "created", report: reportSchema.parse(reportRow()) });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/reports");
+    expect(init.method).toBe("POST");
+    const form = init.body as FormData;
+    expect([...form.keys()].sort()).toEqual(["description", "image", "latitude", "longitude"]);
+    expect(form.get("latitude")).toBe("19.0178");
+    expect(form.get("longitude")).toBe("72.8478");
+    expect(form.get("description")).toBe("Near the bus stop");
+    expect((form.get("image") as File).name).toBe("photo.jpg");
+  });
+
+  it("omits a blank description", async () => {
+    const fetchMock = mockFetch(201, { report: reportRow() });
+    await createReport({ ...input, description: "   " });
+    const form = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as FormData;
+    expect(form.has("description")).toBe(false);
+  });
+
+  it("returns the server's message for a rejected photo", async () => {
+    mockFetch(422, {
+      error: { code: "VALIDATION_ERROR", message: "This photo doesn't appear to show garbage.", details: { outcome: "not_garbage" } },
+    });
+    expect(await createReport(input)).toEqual({
+      kind: "rejected",
+      message: "This photo doesn't appear to show garbage.",
+    });
+  });
+
+  it("reports missing server configuration separately", async () => {
+    mockFetch(503, { error: { code: "CONFIG_MISSING", message: "x", details: { missing: ["GEMINI_API_KEY"] } } });
+    const result = await createReport(input);
+    expect(result.kind).toBe("config-missing");
+    expect(JSON.stringify(result)).not.toContain("GEMINI_API_KEY");
+  });
+
+  it.each([
+    [500, { error: { code: "STORAGE_ERROR", message: "Image upload failed" } }, "Image upload failed"],
+    [502, { error: { code: "AI_UNAVAILABLE", message: "The AI service is unavailable." } }, "The AI service is unavailable."],
+    [500, "<html>", "Request failed (HTTP 500)."],
+  ])("returns a readable error for HTTP %i", async (status, body, message) => {
+    mockFetch(status, body);
+    expect(await createReport(input)).toEqual({ kind: "error", message });
+  });
+
+  it("rejects a malformed success body and handles network failures", async () => {
+    mockFetch(201, { report: { id: "nope" } });
+    expect(await createReport(input)).toEqual({ kind: "error", message: "The server returned data in an unexpected format." });
+
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("fetch failed"))));
+    expect(await createReport(input)).toEqual({ kind: "error", message: "Could not reach the server." });
   });
 });

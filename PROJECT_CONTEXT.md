@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (India-focused heat map with location search on the dashboard; report submission live; branch `feat/ai-classification`, based on `feat/reports-api`).
+> Last updated: 2026-10-11 (MVP complete: report form on the dashboard, verified end to end live; Vercel deployment documented but not yet done; branch `feat/ai-classification`, based on `feat/reports-api`).
 
 ## Rules for every coding session
 
@@ -76,7 +76,7 @@ Directory layout (only folders that exist now, plus planned ones marked):
 src/
   app/
     api/health/route.ts      GET: reports which integrations are configured (booleans only)
-    api/reports/route.ts     GET: list reports (implemented). POST: create (planned)
+    api/reports/route.ts     GET: list reports. POST: classify, upload, and save a new report
     api/reports/[id]/route.ts  PATCH: update status / resolve (implemented)
     api/classify/route.ts    POST: classify an uploaded image (implemented; saves nothing)
     api/complaints/          planned: draft a complaint
@@ -88,12 +88,12 @@ src/
     reports/reports-dashboard.tsx  client: header, data-source badge, demo banner, fetching, state
     reports/report-summary.tsx     summary count cards
     reports/report-filters.tsx     status/category selects + refresh
-    reports/report-list.tsx        report cards with status buttons and OSM link
-    reports/labels.ts              display labels and date formatting (Asia/Kolkata)
+    reports/report-form.tsx        client: "Report garbage" form (photo + preview, location from map/search/device, description, POST /api/reports)
+    reports/report-list.tsx        report cards with photo thumbnail, status buttons, and OSM link
+    reports/labels.ts              display labels, date formatting (Asia/Kolkata), safeImageUrl()
     map/report-map.tsx             client: map section (heading, search, mode toggle, legend, status overlay); loads report-heat-map with next/dynamic (ssr: false)
-    map/report-heat-map.tsx        client-only Leaflet map: OSM tiles, India bounds, leaflet.heat layer, report markers with popups
+    map/report-heat-map.tsx        client-only Leaflet map: OSM tiles, India bounds, leaflet.heat layer, report markers with photo popups, click/drag pin for a new report's location
     map/map-search.tsx             client: "Search city or area in India..." (local Mumbai suggestions, Nominatim on Enter)
-    classify/classify-panel.tsx    client: "Classify a photo" test panel (pick image, preview, POST /api/classify, show outcome)
   lib/
     validation/reports.ts    Zod schemas: the source of truth for shared contracts
     validation/api.ts        Zod schema for API error bodies
@@ -102,7 +102,7 @@ src/
     supabase/server.ts       server-only service-role Supabase client (lazy)
     reports/repository.ts    server-only data access for reports (queries, row validation, DatabaseError)
     reports-client.ts        browser-side API calls with response validation, counts, filtering, demo status rule
-    classify-client.ts       browser-side POST /api/classify with a pre-upload file check and response validation
+    classify-client.ts       browser-side pre-upload file check (used by the report form) and POST /api/classify (no UI uses it now)
     heat-map.ts              pure map logic: India bounds, heat weights (density, delay), coordinate checks, legend levels (no Leaflet)
     geocode.ts               browser-side Nominatim search (India only, 1 req/s, cached) + local Mumbai locality list
     demo-reports.ts          6 typed demo reports used only when the API returns 503 CONFIG_MISSING
@@ -145,10 +145,12 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | Supabase migration (`reports` table, `report-images` bucket) | **Applied** | Applied to project `trash-map` on 2026-10-11 and verified by catalog queries (section F). |
 | Seed data (25 sample reports) | **Applied** | 25 rows in `trash-map` (17 pending, 4 in progress, 4 resolved), all `is_sample` and `[SAMPLE]`. |
 | App ↔ Supabase connection | **Tested (live)** | Legacy `service_role` key for `trash-map` in `.env.local`. 22 live API checks passed on 2026-10-11 (section J); the dashboard shows "Live data" with 25 reports. |
-| 1. Photo upload | Backend **Tested (live)**; UI not started | `POST /api/reports` accepts the photo, validates it, and stores it in `report-images`. No submission form yet. |
-| 2. Location selection / geolocation | Not started | |
+| 1. Photo upload | **Tested (live)** | "Report garbage" form on the dashboard posts to `POST /api/reports`. Verified end to end in a browser against Supabase and the live model (section J). |
+| 2. Location selection / geolocation | **Tested (live)** for map click and search; geolocation implemented, not tested | Click the map or pick a search result to drop a draggable pin. "Use my location" uses the browser's geolocation API. |
 | 3. Gemma classification (`POST /api/classify`) | **Tested (live)** | 49 mocked unit tests, plus 5 real classifications with `gemma-4-26b-a4b-it` on 2026-10-11 that returned the expected outcomes (section J). Also runs server-side inside `POST /api/reports`. |
-| Classify test panel (UI) | Tested | "Classify a photo" panel on the dashboard, between the summary and the map. Unit tests for `classify-client.ts`; verified in a browser against the live model (section J). |
+| Classify test panel (UI) | Removed | Replaced by the report form on 2026-10-11. `POST /api/classify` itself is unchanged. |
+| Report photos in the UI | **Tested (live)** | 80 px thumbnails on cards (link to the full photo) and a photo at the top of map popups. Only `http(s)` and same-site URLs are rendered. |
+| Vercel deployment | Documented, **not deployed** | Build passes, no `vercel.json` needed, steps in the README. Needs Tejas's Vercel account. |
 | 4. Classification schema validation | **Tested (live)** | All 5 real model outputs passed Zod validation and mapped to valid `ClassifyResponse` shapes. |
 | 5. Save report + image to Supabase (`POST /api/reports`) | **Tested (live)** | 32 mocked route tests, plus a live run on 2026-10-11: a garbage photo gave 201 with the row and image in Supabase, and a clean-street photo gave 422 with nothing stored (section J). |
 | Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
@@ -156,7 +158,7 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | 7. Density heat map | **Tested** | `leaflet.heat`, weight 1 per report. Unit tests plus a browser check. |
 | 8. Delay-weighted heat for unresolved reports | **Tested** | Resolved reports excluded; formula in section H. Unit tests plus a browser check, including a status change. |
 | 9. Complaint drafts | Not started | Contract defined. |
-| 10. Mark as resolved | Implemented | Backend `PATCH /api/reports/[id]` plus per-card status buttons in the dashboard. Verified live against `trash-map` through the API. |
+| 10. Mark as resolved | **Tested (live)** | Backend `PATCH /api/reports/[id]` plus per-card status buttons. Verified live through the API and through the dashboard on a newly submitted report (section J). |
 | 11. Sample data | Implemented | See seed row above. |
 
 ## E. Shared contracts
@@ -499,6 +501,24 @@ Integration rules:
 
 ## J. Testing and known issues
 
+**MVP end-to-end verification (2026-10-11, branch `feat/ai-classification`): succeeded.**
+- `npm run check` passed: lint, typecheck, Vitest **193/193** across 11 files. `npm run build` passed: `/` is static, and all four API routes are dynamic.
+  - `tests/lib/reports-client.test.ts` gained 8 `createReport` cases: multipart fields, a blank description left out, 422 shown as a rejection with the server's message, 503 `CONFIG_MISSING` without leaking variable names, 500/502/non-JSON errors, a malformed success body, and network failure.
+  - `tests/lib/labels.test.ts` (6 cases): `safeImageUrl` allows https, http, and same-site paths, and rejects `javascript:`, `data:`, protocol-relative, and unparseable URLs.
+- **Live browser run** on `next dev` with the real `trash-map` project and `gemma-4-26b-a4b-it`. Baseline by SQL: 25 rows (17 pending, 4 in progress, 4 resolved), 0 storage objects.
+  - The dashboard loaded 25 live reports.
+  - Typing "Bandra" and picking the local suggestion set the form's location (19.0596, 72.8295) and dropped the draggable pin.
+  - `garbage.jpg` was injected into the file input, with the description `[E2E TEST] MVP form submission check`. **Submit was clicked twice in a row: exactly one POST was sent.** The button read "Checking photo…". After 3.5 s the form showed "Report saved as Mixed. It's now on the map and in the list." and the new card was first, with the count at 26. A new red dot and heat appeared at Bandra West, and the pin cleared.
+  - SQL: one new row (`mixed`, `pending`, `resolved_at` null, `ai_analysis` set, `image_url` in `report-images/reports/`), 26 total.
+  - Clicking empty map set a new location. `clean-street.jpg` was rejected after 3.0 s with "This photo doesn't appear to show garbage…". The photo stayed selected and the list stayed at 26. SQL: still 26 rows, 1 object, **0 orphaned objects**.
+  - On the test card, "Mark in progress", then "Mark resolved", updated the card each time, and the resolved time appeared. SQL: `resolved`, with `resolved_at` set.
+  - After a reload, the test report was still there, resolved, and its thumbnail loaded from `olohsrjldukoatxxptds.supabase.co`.
+- Invalid input against the running server (curl), all rejected before any AI call: no image (400), latitude 95 (400), latitude `abc` (400), a text file declared as JPEG (400), a JSON body (415), PATCH with an unknown status (400), PATCH with a non-UUID id (400), and `limit=999` (400).
+- **Cleanup:** only the test row (checked by id and the `[E2E TEST]` prefix) and its image were deleted with the service-role client. SQL afterwards: 25 rows, 0 objects, and the sample fingerprint unchanged (`bfc1c719…`).
+- **Secret scan:** after the production build, all 45 browser-delivered files (`.next/static` plus prerendered HTML and RSC) were searched for the actual `SUPABASE_SERVICE_ROLE_KEY` and `GEMINI_API_KEY` values, read from `.env.local` without printing them. 0 matches, and the variable names themselves don't appear either.
+- **Security review of the new UI:** user text is rendered by React or with `textContent`. Photo URLs pass through `safeImageUrl` before they become an `href` or `src`, because `image_url` is only validated as a non-empty string. The submit button is guarded by a ref, so a double click can't send two requests. The form never sends a category, status, or confidence.
+- Not checked live: "Use my location" (needs a permission prompt), the `unclear_category` message, the 503 config-missing message in the form (mocked tests only), and a real Vercel deployment.
+
 **India heat map and location search verification (2026-10-11):**
 - `npm run check` passed: lint, typecheck, Vitest **179/179** across 10 files. `npm run build` passed, and `/` is still statically prerendered.
   - `tests/lib/heat-map.test.ts` (13 tests): delay weight at 0, 7, 11.2, and 365 days, future timestamps, and resolved excluded. Density points use the reports' real coordinates. Delay mode drops resolved reports and follows status changes. Invalid coordinates (NaN, Infinity, out of range) and empty input are handled. Gradient stops match the legend.
@@ -683,7 +703,7 @@ Known issues and risks:
   - Heat intensity depends on screen distance, so zooming out merges nearby reports into hotter spots. That's expected for a heat map, but the "about 3 reports" legend wording is approximate.
   - Delay weights use the browser's clock and are recomputed when reports change, not continuously.
   - With hundreds of reports, every marker is a focusable DOM element, which is a lot of tab stops. Consider clustering or hiding markers at low zoom.
-  - No new-report refresh hook yet, because there's no report form. When one is added, appending the returned report to the list will update the map automatically.
+  - A new report is added to the loaded list, which updates the map. If the active filters would hide it, the filters are reset so it stays visible.
 - The SQL migration has not been run against Postgres, so syntax errors there would not have been caught.
 - Classification known limitations:
   - Detecting "this model can't read images" and "this model doesn't support JSON mode" relies on matching words in the provider's 400 message. Neither has been seen live, because `gemma-4-26b-a4b-it` supports both. Unmatched cases fall through to the generic 502 `AI_UNAVAILABLE`.
@@ -710,13 +730,13 @@ Done:
 - Dashboard scaffold: summary, filters, report list with status buttons, map placeholder, and labeled demo mode.
 - `POST /api/classify` with server-only Gemma classification, image validation, and typed errors. Mocked tests plus live verification with `gemma-4-26b-a4b-it`.
 - `POST /api/reports`: server-side validation, classification, storage upload, and insert, with cleanup on failure. Mocked tests plus a live run.
+- Report form, map location picking, report photos, and live end-to-end verification (MVP complete).
 
-Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-list.tsx`):
+Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-form.tsx`):
 - Visual design: colors, status and category styling, typography, spacing, and a desktop layout (for example, map beside the list).
 - The map, heat layers, and search (features 6–8) are in `src/components/map/`. Restyle freely. Marker clustering would help once there are many reports.
-- Show report images. `image_url` is already in every `Report`, but cards don't render it yet.
 - Optionally swap the native selects for shadcn components, and add loading skeletons and toasts.
-- Report submission form (feature 1–2 UI). `POST /api/reports` is ready (section E).
+- The form rejects photos over 4 MB instead of downscaling them. Client-side downscaling would help with phone photos.
 
 Next, in priority order:
 1. ~~(Tejas) Supabase live~~ **Done 2026-10-11:** every check below passed (section J). Kept for re-verification on other machines:
@@ -733,13 +753,25 @@ Next, in priority order:
    - Decide whether construction rubble should beat `mixed` in the prompt.
    - To re-verify on another machine, put that machine's key in its `.env.local` and repeat the curl steps in section J.
 4. ~~(Tejas) `POST /api/reports`~~ **Done 2026-10-11** (section E for the contract, section J for verification).
-5. **(Aashish) Report form UI:** photo, geolocation or map pin, optional description, then `POST /api/reports` as multipart. Show the 422 `message` for rejected photos, and add the returned `report` to the list on 201. Downscale photos over 4 MB first. A `/api/classify` preview is optional and costs an extra model call. A small `createReport()` helper in `src/lib/reports-client.ts` would fit the existing pattern; Tejas can add it.
-6. Complaint drafts (feature 9). Delay-weighted heat (feature 8) is done.
-7. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
+5. ~~Report form UI~~ **Done 2026-10-11** (section J). Aashish may restyle it.
+6. **(Tejas) Deploy to Vercel:** follow "Deploying to Vercel" in the README, then check `/api/health` and submit one test report on the deployment. Not done yet; it needs Tejas's Vercel account.
+7. Complaint drafts (feature 9). Delay-weighted heat (feature 8) is done.
+8. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
 
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · MVP completion: report form, map picking, photos, Vercel prep
+- **Summary:** the dashboard can now create reports. A new "Report garbage" form takes a photo (with preview and a pre-upload type and size check), a location (click the map, pick a search result, drag the pin, or use the device location), and an optional description, then posts to `POST /api/reports`. Success is shown only after the server saves the report, which is then added to the list and the map. Rejected photos show the server's message and save nothing. The form replaces the "Classify a photo" test panel. Cards and map popups now show the report photo. The README has Tests and Vercel deployment sections. Verified end to end live (section J).
+- **Contract impact:** none. No API, schema, or database changes. New client helper `createReport()` in `src/lib/reports-client.ts`, which uses the existing `POST /api/reports` contract.
+- **Files:**
+  - New: `src/components/reports/report-form.tsx`, `tests/lib/labels.test.ts`.
+  - Changed: `src/lib/reports-client.ts`, `src/components/reports/reports-dashboard.tsx`, `src/components/reports/report-list.tsx`, `src/components/reports/labels.ts`, `src/components/map/report-map.tsx`, `src/components/map/report-heat-map.tsx`, `tests/lib/reports-client.test.ts`, `README.md`.
+  - Deleted: `src/components/classify/classify-panel.tsx`.
+  - No new dependencies, no `vercel.json`.
+- **For Aashish:** `report-form.tsx` is functional but unstyled beyond the existing look. The dashboard passes the picked location between the form and the map (`pickedLocation`).
+- **Remaining:** the Vercel deployment itself (needs Tejas's account), client-side photo downscaling, and complaint drafts.
 
 ### 2026-10-11 · India heat map and location search
 - **Summary:** replaced the dashboard's map placeholder with an interactive Leaflet map on OpenStreetMap. It opens on Mumbai and is limited to India. It has a `Density | Unresolved delay` heat toggle (`leaflet.heat`), status-coloured report markers with popups, a compact Low to Severe legend, and a "Search city or area in India..." field (local Mumbai suggestions, Nominatim on Enter). Ideas were taken selectively from Aashish's world-map reference on `feature/aashish-frontend-ui`, which isn't merged. The rest of the dashboard (header, summary, classify panel, filters, list, styling) is unchanged.

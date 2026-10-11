@@ -104,6 +104,55 @@ export async function updateReportStatus(
   return { ok: true, report: parsed.data.report };
 }
 
+export type NewReportInput = {
+  image: File;
+  latitude: number;
+  longitude: number;
+  description?: string;
+};
+
+export type CreateReportResult =
+  | { kind: "created"; report: Report }
+  | { kind: "rejected"; message: string }
+  | { kind: "config-missing"; message: string }
+  | { kind: "error"; message: string };
+
+/**
+ * Sends only the photo, coordinates, and description. The server classifies
+ * the photo and decides every other field.
+ */
+export async function createReport(input: NewReportInput, signal?: AbortSignal): Promise<CreateReportResult> {
+  const form = new FormData();
+  form.set("image", input.image);
+  form.set("latitude", String(input.latitude));
+  form.set("longitude", String(input.longitude));
+  const description = input.description?.trim();
+  if (description) form.set("description", description);
+
+  let res: Response;
+  try {
+    res = await fetch("/api/reports", { method: "POST", body: form, signal });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return { kind: "error", message: "Could not reach the server." };
+  }
+
+  const body = await readJson(res);
+  if (!res.ok) {
+    const parsed = apiErrorSchema.safeParse(body);
+    const message = errorMessage(body, res.status);
+    if (res.status === 422) return { kind: "rejected", message };
+    if (res.status === 503 && parsed.success && parsed.data.error.code === "CONFIG_MISSING") {
+      return { kind: "config-missing", message: "Saving reports is unavailable: the server isn't fully configured." };
+    }
+    return { kind: "error", message };
+  }
+
+  const parsed = updateResponseSchema.safeParse(body);
+  if (!parsed.success) return { kind: "error", message: UNEXPECTED_FORMAT };
+  return { kind: "created", report: parsed.data.report };
+}
+
 export function filterReports(reports: Report[], filters: ReportFilters): Report[] {
   return reports.filter(
     (report) =>

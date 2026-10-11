@@ -1,8 +1,9 @@
 import { ExternalLink } from "lucide-react";
+import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { REPORT_STATUSES } from "@/lib/validation/reports";
 import type { Report, ReportStatus } from "@/types/reports";
-import { CATEGORY_LABELS, STATUS_LABELS, formatDate } from "./labels";
+import { CATEGORY_LABELS, STATUS_LABELS, formatDate, safeImageUrl } from "./labels";
 
 type ReportListProps = {
   reports: Report[];
@@ -37,6 +38,7 @@ type ReportCardProps = {
 
 function ReportCard({ report, updating, error, onStatusChange }: ReportCardProps) {
   const headingId = `report-${report.id}`;
+  const imageUrl = safeImageUrl(report.image_url);
   const osmUrl = `https://www.openstreetmap.org/?mlat=${report.latitude}&mlon=${report.longitude}#map=18/${report.latitude}/${report.longitude}`;
 
   return (
@@ -57,7 +59,20 @@ function ReportCard({ report, updating, error, onStatusChange }: ReportCardProps
         )}
       </header>
 
-      <p className="text-sm">{report.description ?? "No description provided."}</p>
+      <div className="flex gap-3">
+        {imageUrl && (
+          <a
+            href={imageUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="relative size-20 shrink-0 overflow-hidden rounded-md border bg-muted outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            <Image src={imageUrl} alt="" fill unoptimized sizes="80px" className="object-cover" />
+            <span className="sr-only">Open photo (opens in a new tab)</span>
+          </a>
+        )}
+        <p className="text-sm">{report.description ?? "No description provided."}</p>
+      </div>
 
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground">
         <dt>Location</dt>

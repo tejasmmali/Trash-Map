@@ -6,7 +6,8 @@ import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 import "leaflet.heat";
 import { useEffect, useRef } from "react";
-import { CATEGORY_LABELS, STATUS_LABELS, formatDate } from "@/components/reports/labels";
+import { CATEGORY_LABELS, STATUS_LABELS, formatDate, safeImageUrl } from "@/components/reports/labels";
+import type { PickedLocation } from "@/components/reports/report-form";
 import type { Place } from "@/lib/geocode";
 import {
   HEAT_GRADIENT,
@@ -26,7 +27,20 @@ import type { Report, ReportStatus } from "@/types/reports";
 
 export type MapFocus = { place: Place; key: number };
 
-type Props = { reports: Report[]; mode: HeatMode; focus: MapFocus | null };
+type Props = {
+  reports: Report[];
+  mode: HeatMode;
+  focus: MapFocus | null;
+  picked: PickedLocation | null;
+  onPick: (location: PickedLocation) => void;
+};
+
+const PICK_ICON = L.divIcon({
+  className: "",
+  html: '<span class="block size-5 rounded-full border-[3px] border-white bg-foreground shadow-md ring-2 ring-foreground/30"></span>',
+  iconSize: [20, 20],
+  iconAnchor: [10, 10],
+});
 
 const MARKER_COLORS: Record<ReportStatus, string> = {
   pending: "bg-red-600",
@@ -47,7 +61,16 @@ function markerIcon(status: ReportStatus): L.DivIcon {
 /** Built with DOM nodes, never HTML strings, because descriptions are user input. */
 function popupContent(report: Report): HTMLElement {
   const root = document.createElement("div");
-  root.className = "flex max-w-56 flex-col gap-1 font-sans text-sm";
+  root.className = "flex w-52 flex-col gap-1 font-sans text-sm";
+  const imageUrl = safeImageUrl(report.image_url);
+  if (imageUrl) {
+    const image = document.createElement("img");
+    image.src = imageUrl;
+    image.alt = `Photo of the ${CATEGORY_LABELS[report.category].toLowerCase()} report`;
+    image.loading = "lazy";
+    image.className = "mb-1 aspect-4/3 w-full rounded border bg-muted object-cover";
+    root.append(image);
+  }
   const title = document.createElement("p");
   title.className = "font-medium";
   title.textContent = `${CATEGORY_LABELS[report.category]} · ${STATUS_LABELS[report.status]}`;
@@ -64,11 +87,17 @@ function popupContent(report: Report): HTMLElement {
   return root;
 }
 
-export default function ReportHeatMap({ reports, mode, focus }: Props) {
+export default function ReportHeatMap({ reports, mode, focus, picked, onPick }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const heatRef = useRef<L.HeatLayer | null>(null);
   const markersRef = useRef<L.LayerGroup | null>(null);
+  const pinRef = useRef<L.Marker | null>(null);
+  const onPickRef = useRef(onPick);
+
+  useEffect(() => {
+    onPickRef.current = onPick;
+  }, [onPick]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -91,6 +120,10 @@ export default function ReportHeatMap({ reports, mode, focus }: Props) {
     // Wheel zoom only while the map has focus, so the page still scrolls.
     map.on("focus", () => map.scrollWheelZoom.enable());
     map.on("blur", () => map.scrollWheelZoom.disable());
+    // Marker clicks don't reach the map, so this only fires on empty map areas.
+    map.on("click", (event: L.LeafletMouseEvent) =>
+      onPickRef.current({ latitude: event.latlng.lat, longitude: event.latlng.lng }),
+    );
 
     // `maxZoom` equal to the minimum zoom stops leaflet.heat from fading
     // weights at lower zooms, so a weight means the same thing at every zoom.
@@ -119,8 +152,38 @@ export default function ReportHeatMap({ reports, mode, focus }: Props) {
       mapRef.current = null;
       heatRef.current = null;
       markersRef.current = null;
+      pinRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!picked || !isValidCoordinate(picked.latitude, picked.longitude)) {
+      pinRef.current?.remove();
+      pinRef.current = null;
+      return;
+    }
+    const latLng = L.latLng(picked.latitude, picked.longitude);
+    if (!pinRef.current) {
+      pinRef.current = L.marker(latLng, {
+        icon: PICK_ICON,
+        draggable: true,
+        keyboard: true,
+        title: "New report location (drag to adjust)",
+        alt: "New report location",
+        zIndexOffset: 1000,
+      })
+        .on("dragend", (event) => {
+          const { lat, lng } = (event.target as L.Marker).getLatLng();
+          onPickRef.current({ latitude: lat, longitude: lng });
+        })
+        .addTo(map);
+    } else {
+      pinRef.current.setLatLng(latLng);
+    }
+    if (!map.getBounds().contains(latLng)) map.flyTo(latLng, Math.max(map.getZoom(), 15), { duration: 0.8 });
+  }, [picked]);
 
   useEffect(() => {
     const heat = heatRef.current;

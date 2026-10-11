@@ -4,7 +4,7 @@ Open-source garbage reporting and heat map for Mumbai, built for **Hacktoberfest
 
 Citizens photograph a garbage pile, pin its location, and an AI model (Gemma via the Gemini API) classifies it. Reports appear on an OpenStreetMap-based map with a heat layer where unresolved reports glow hotter the longer they wait. The app can also draft a complaint to the municipal corporation.
 
-> **Status:** early. The dashboard lists reports and updates their status through `GET /api/reports` and `PATCH /api/reports/[id]`. Without Supabase credentials it runs in a clearly labeled demo mode. `POST /api/classify` classifies a photo with the configured Gemma model (verified live with `gemma-4-26b-a4b-it`). `POST /api/reports` classifies, uploads, and saves a new report (verified live against Supabase). The dashboard map is an India-focused OpenStreetMap view with a density / unresolved-delay heat toggle and location search (OpenStreetMap Nominatim, used within its [usage policy](https://operations.osmfoundation.org/policies/nominatim/)). The report form UI is not implemented yet. See [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the live status of every feature.
+> **Status:** MVP complete. On the dashboard you can upload a photo, pick the location (click the map, search a place, or use your device location), and submit. The server classifies the photo with the configured Gemma model, stores it, and saves the report, which then appears in the list and on the map. Reports can be moved between pending, in progress, and resolved. The map is an India-focused OpenStreetMap view with a density / unresolved-delay heat toggle and location search (OpenStreetMap Nominatim, used within its [usage policy](https://operations.osmfoundation.org/policies/nominatim/)). Without Supabase credentials the dashboard runs in a clearly labeled read-only demo mode. The full flow was verified live against Supabase and `gemma-4-26b-a4b-it`. See [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the status of every feature.
 
 ## Tech stack
 
@@ -34,6 +34,8 @@ curl http://localhost:3000/api/health
 2. Run `supabase/migrations/20261011083327_create_reports.sql` in the SQL editor (or `supabase db push` with the Supabase CLI). This creates the `reports` table and the public `report-images` storage bucket.
 3. Optionally run `supabase/seed.sql` to load 25 clearly marked sample reports across Mumbai.
 4. Copy the project URL and the **secret** key (`sb_secret_…`, or the legacy `service_role` key) into `.env.local`. A publishable or `anon` key is rejected, because it can't read the table.
+
+The `report-images` bucket is **public**: anyone with a photo's URL can view it. That is what lets the list and map show photos with plain `<img>` URLs. Uploads and all database access go through the server with the secret key, so the public can read photos but not write them. Making the bucket private would require switching the app to signed URLs.
 
 ### Gemini
 
@@ -82,6 +84,32 @@ curl -F image=@photo.jpg -F latitude=19.0178 -F longitude=72.8478 -F "descriptio
 | `npm run typecheck` | Generate route types and run `tsc`    |
 | `npm run test`      | Run the Vitest suite once             |
 | `npm run check`     | Lint, typecheck, and tests            |
+
+## Tests
+
+`npm run check` runs ESLint, the TypeScript check, and the Vitest suite. The tests mock Supabase, Gemini, and the geocoder, so they need no credentials and make no network calls. A live check of the real integrations has to be done by hand: run `npm run dev` with `.env.local` filled in, submit a garbage photo and a photo without garbage from the dashboard, and confirm that only the first one is saved.
+
+## Deploying to Vercel
+
+The app runs on Vercel as a standard Next.js project. No `vercel.json` is needed: the dashboard is prerendered, and the API routes run as Node.js functions.
+
+1. Push the branch to GitHub, then in Vercel choose **Add New → Project** and import the repository. The framework preset (Next.js), build command, and output settings are detected automatically.
+2. Under **Settings → Environment Variables**, add these for **Production** and **Preview**:
+
+   | Variable                    | Required | Notes                                                                        |
+   | --------------------------- | -------- | ---------------------------------------------------------------------------- |
+   | `NEXT_PUBLIC_SUPABASE_URL`  | Yes      | Supabase project URL                                                         |
+   | `SUPABASE_SERVICE_ROLE_KEY` | Yes      | Secret key. Mark it **Sensitive**. Never prefix it with `NEXT_PUBLIC_`.      |
+   | `GEMINI_API_KEY`            | Yes      | Mark it **Sensitive**                                                        |
+   | `GEMINI_MODEL`              | Yes      | e.g. `gemma-4-26b-a4b-it`                                                    |
+   | `SUPABASE_STORAGE_BUCKET`   | No       | Defaults to `report-images`                                                  |
+   | `NEXT_PUBLIC_GEOCODER_URL`  | No       | Defaults to public Nominatim. Built into the page, so change it with a redeploy. |
+
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY` is not used yet and can be left out.
+3. Deploy, open the deployment URL, and check `/api/health`. Every value should be `true`. Then submit one test report from the dashboard.
+4. If something fails, open the deployment's **Logs** tab. Server errors are logged with their category and never include keys or image data.
+
+Vercel limits a function request body to 4.5 MB, which fits the app's 4 MB photo limit.
 
 ## Contributing
 
