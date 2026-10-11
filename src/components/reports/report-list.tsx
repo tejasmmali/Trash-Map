@@ -45,6 +45,10 @@ function ReportCard({ report, updating, error, onStatusChange }: ReportCardProps
       aria-busy={updating}
       className="flex h-full flex-col gap-3 rounded-lg border bg-card p-4"
     >
+      <div className="overflow-hidden rounded-md bg-muted">
+        <img src={report.image_url} alt="" className="h-28 w-full object-cover" />
+      </div>
+
       <header className="flex flex-wrap items-center gap-2">
         <h3 id={headingId} className="font-medium">
           {CATEGORY_LABELS[report.category]}

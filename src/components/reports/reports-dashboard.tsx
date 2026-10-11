@@ -1,7 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { MapPlaceholder } from "@/components/map/map-placeholder";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Filter, List, Menu, Plus, RefreshCw, X } from "lucide-react";
+import { MapControls } from "@/components/map/map-controls";
+import { MapLegend } from "@/components/map/map-legend";
+import { MapSearch } from "@/components/map/map-search";
+import { TrashMap, type MapViewHandle } from "@/components/map/trash-map";
+import type { MapLayerMode } from "@/components/map/map-constants";
 import { Button } from "@/components/ui/button";
 import { DEMO_REPORTS } from "@/lib/demo-reports";
 import {
@@ -14,13 +19,14 @@ import {
   type ReportFilters as Filters,
 } from "@/lib/reports-client";
 import type { Report, ReportStatus } from "@/types/reports";
+import { ReportDetailSheet } from "./report-detail-sheet";
 import { ReportFilters } from "./report-filters";
 import { ReportList } from "./report-list";
-import { ReportSummary } from "./report-summary";
+import { ReportWasteSheet } from "./report-waste-sheet";
 
 type Mode = "loading" | "live" | "demo" | "error";
-
 type LoadedResult = FetchReportsResult & { key: string };
+type Panel = "none" | "filters" | "list" | "menu";
 
 export function ReportsDashboard() {
   const [filters, setFilters] = useState<Filters>({});
@@ -31,10 +37,15 @@ export function ReportsDashboard() {
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [updatingIds, setUpdatingIds] = useState<ReadonlySet<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [layer, setLayer] = useState<MapLayerMode>("density");
+  const [layersOpen, setLayersOpen] = useState(false);
+  const [panel, setPanel] = useState<Panel>("none");
+  const [selectedReports, setSelectedReports] = useState<Report[]>([]);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [locateMessage, setLocateMessage] = useState<string | null>(null);
+  const mapHandle = useRef<MapViewHandle | null>(null);
   const inFlight = useRef(new Set<string>());
 
-  // Changing filters or pressing refresh produces a new key, which restarts
-  // the list from offset 0. `loading` is derived instead of stored.
   const requestKey = `${filters.status ?? ""}|${filters.category ?? ""}|${reloadToken}`;
   const loading = result?.key !== requestKey;
 
@@ -46,6 +57,12 @@ export function ReportsDashboard() {
     return () => controller.abort();
   }, [filters, requestKey]);
 
+  useEffect(() => {
+    if (!locateMessage) return;
+    const timer = window.setTimeout(() => setLocateMessage(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [locateMessage]);
+
   const mode: Mode =
     result?.kind === "ok"
       ? "live"
@@ -55,8 +72,6 @@ export function ReportsDashboard() {
           ? "error"
           : "loading";
 
-  // Live rows are already filtered by the API; re-filtering drops reports whose
-  // status was just changed so live and demo mode behave the same.
   const reports =
     result?.kind === "ok"
       ? filterReports(result.reports, filters)
@@ -65,6 +80,8 @@ export function ReportsDashboard() {
         : [];
   const hasMore = result?.kind === "ok" && result.pagination.has_more;
   const filtered = Boolean(filters.status || filters.category);
+  const counts = summarizeReports(reports);
+  const selectedId = selectedReports[0]?.id ?? null;
 
   function changeFilters(next: Filters) {
     setFilters(next);
@@ -108,6 +125,9 @@ export function ReportsDashboard() {
       setDemoReports((prev) =>
         prev.map((item) => (item.id === report.id ? applyDemoStatus(item, status, now) : item)),
       );
+      setSelectedReports((prev) =>
+        prev.map((item) => (item.id === report.id ? applyDemoStatus(item, status, now) : item)),
+      );
       return;
     }
 
@@ -132,113 +152,328 @@ export function ReportsDashboard() {
             }
           : prev,
       );
+      setSelectedReports((prev) =>
+        prev.map((item) => (item.id === report.id ? outcome.report : item)),
+      );
     } else {
       setErrors((prev) => ({ ...prev, [report.id]: outcome.message }));
     }
   }
 
+  function togglePanel(next: Panel) {
+    setPanel((current) => (current === next ? "none" : next));
+    setLayersOpen(false);
+  }
+
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-8 sm:px-6">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Trash Map</h1>
-          <p className="text-muted-foreground">Community-powered garbage reporting for Mumbai</p>
+    <div className="flex h-[100dvh] min-h-[100dvh] w-full flex-col overflow-hidden bg-[var(--map-bg)] text-[var(--map-fg)]">
+      <header className="z-40 shrink-0 px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 sm:px-4">
+        <div className="mx-auto flex max-w-6xl flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-white/10 bg-[color-mix(in_oklch,var(--map-panel)_94%,transparent)] px-3 py-2 shadow-sm backdrop-blur-md sm:flex-none sm:px-4">
+              <p className="truncate text-base font-semibold tracking-tight sm:text-lg">Trash Map</p>
+            </div>
+
+            <div className="hidden min-w-0 flex-1 sm:block">
+              <MapSearch
+                onSelectPlace={(place) => mapHandle.current?.flyTo(place.lat, place.lng)}
+              />
+            </div>
+
+            <Button
+              type="button"
+              className="hidden h-11 bg-[var(--map-accent)] px-4 text-[var(--map-accent-fg)] hover:bg-[var(--map-accent)]/90 sm:inline-flex"
+              onClick={() => setReportOpen(true)}
+            >
+              <Plus />
+              Report waste
+            </Button>
+
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-lg"
+              className="rounded-xl border border-white/10 bg-[color-mix(in_oklch,var(--map-panel)_94%,transparent)] text-[var(--map-fg)] shadow-sm backdrop-blur-md hover:bg-white/10"
+              aria-label="Open menu"
+              aria-expanded={panel === "menu"}
+              onClick={() => togglePanel("menu")}
+            >
+              {panel === "menu" ? <X /> : <Menu />}
+            </Button>
+          </div>
+
+          <div className="sm:hidden">
+            <MapSearch
+              onSelectPlace={(place) => mapHandle.current?.flyTo(place.lat, place.lng)}
+            />
+          </div>
         </div>
-        <DataSourceBadge mode={mode} />
       </header>
 
-      {mode === "demo" && (
-        <div role="status" className="rounded-lg border border-dashed bg-muted/40 p-4 text-sm">
-          <p className="font-medium">Demo mode: showing example reports</p>
-          <p className="text-muted-foreground">
-            The server is not connected to Supabase yet, so these are built-in examples, not real
-            community submissions. Status changes only affect this browser tab and are not saved.
-          </p>
-        </div>
-      )}
-
-      <ReportSummary
-        counts={summarizeReports(reports)}
-        note={summaryNote(mode, reports.length, filtered, hasMore)}
-      />
-
-      <MapPlaceholder />
-
-      <section aria-labelledby="reports-heading" aria-busy={loading} className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <h2 id="reports-heading" className="text-lg font-medium">
-            Reports
-          </h2>
-          <ReportFilters
-            filters={filters}
-            onChange={changeFilters}
-            onRefresh={refresh}
-            refreshing={loading && result !== null}
-          />
-        </div>
-
-        {result === null ? (
-          <p className="text-sm text-muted-foreground">Loading reports…</p>
-        ) : result.kind === "error" ? (
-          <div role="alert" className="flex flex-col items-start gap-2 rounded-lg border border-destructive/40 p-4 text-sm">
-            <p className="font-medium">Could not load reports</p>
-            <p className="text-muted-foreground">{result.message}</p>
-            <Button variant="outline" size="sm" onClick={refresh}>
-              Try again
-            </Button>
-          </div>
-        ) : reports.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {filtered ? "No reports match these filters." : "No reports yet."}
-          </p>
-        ) : (
-          <ReportList
+      <div className="mx-3 mb-2 shrink-0 sm:mx-auto sm:mb-3 sm:w-full sm:max-w-3xl sm:px-4">
+        <div className="relative h-[min(36vh,16.5rem)] rounded-2xl border border-white/10 bg-[var(--map-bg)] sm:h-[min(40vh,22rem)]">
+          <TrashMap
             reports={reports}
-            updatingIds={updatingIds}
-            errors={errors}
-            onStatusChange={changeStatus}
+            layer={layer}
+            selectedId={selectedId}
+            onSelectReports={(next) => {
+              setSelectedReports(next);
+              setPanel("none");
+            }}
+            onReady={(handle) => {
+              mapHandle.current = handle;
+            }}
+            onLocateError={setLocateMessage}
           />
+
+          <div className="pointer-events-none absolute inset-x-0 top-2 z-30 px-2">
+            <div className="pointer-events-none max-w-[14rem]">
+              {(mode === "demo" || mode === "error" || loading) && (
+                <div
+                  role="status"
+                  className="pointer-events-auto rounded-xl border border-white/10 bg-[color-mix(in_oklch,var(--map-panel)_94%,transparent)] px-3 py-2 text-xs text-[var(--map-muted)] shadow-sm backdrop-blur-md"
+                >
+                  {mode === "demo" && "Demo data, not saved"}
+                  {mode === "error" && "Could not load reports"}
+                  {mode === "loading" && "Loading reports…"}
+                  {mode === "live" && loading && "Refreshing…"}
+                </div>
+              )}
+              {locateMessage && (
+                <p
+                  role="status"
+                  className="pointer-events-auto mt-2 rounded-xl border border-white/10 bg-[color-mix(in_oklch,var(--map-panel)_94%,transparent)] px-3 py-2 text-xs text-[var(--map-muted)] shadow-sm backdrop-blur-md"
+                >
+                  {locateMessage}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="pointer-events-none absolute bottom-2 left-2 z-30">
+            <MapLegend />
+          </div>
+
+          <div className="pointer-events-auto absolute bottom-2 right-2 z-30">
+            <MapControls
+              layer={layer}
+              layersOpen={layersOpen}
+              onToggleLayers={() => {
+                setLayersOpen((open) => !open);
+                setPanel("none");
+              }}
+              onLayerChange={(next) => {
+                setLayer(next);
+                setLayersOpen(false);
+              }}
+              onLocate={() => mapHandle.current?.locateUser()}
+              onZoomIn={() => mapHandle.current?.zoomIn()}
+              onZoomOut={() => mapHandle.current?.zoomOut()}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="relative min-h-0 flex-1">
+        <div className="px-3 pb-2 text-xs text-[var(--map-muted)] sm:px-4">
+          <span className="font-medium text-[var(--map-fg)]">{counts.total}</span> loaded
+          {filtered ? " · filtered" : ""} · warm dots show trash heat · drag, pinch, or scroll to zoom
+        </div>
+
+        <ReportDetailSheet
+          reports={selectedReports}
+          open={selectedReports.length > 0 && panel === "none"}
+          updatingIds={updatingIds}
+          errors={errors}
+          onClose={() => setSelectedReports([])}
+          onStatusChange={changeStatus}
+          onOpenList={() => {
+            setSelectedReports([]);
+            setPanel("list");
+          }}
+        />
+
+        {panel === "filters" && (
+          <SidePanel title="Filters" onClose={() => setPanel("none")}>
+            <ReportFilters
+              filters={filters}
+              onChange={changeFilters}
+              onRefresh={refresh}
+              refreshing={loading && result !== null}
+              compact
+            />
+          </SidePanel>
         )}
 
-        {hasMore && (
-          <div className="flex flex-col items-center gap-2">
-            <Button variant="outline" onClick={loadMore} disabled={loadingMore || loading}>
-              {loadingMore ? "Loading…" : "Load more"}
-            </Button>
-            {loadMoreError && (
-              <p role="alert" className="text-sm text-destructive">
-                {loadMoreError}
+        {panel === "list" && (
+          <SidePanel title="Reports" onClose={() => setPanel("none")} wide>
+            {result === null ? (
+              <p className="text-sm text-[var(--map-muted)]">Loading reports…</p>
+            ) : result.kind === "error" ? (
+              <div role="alert" className="flex flex-col items-start gap-2 text-sm">
+                <p className="font-medium text-[var(--map-fg)]">Could not load reports</p>
+                <p className="text-[var(--map-muted)]">{result.message}</p>
+                <Button variant="outline" size="sm" onClick={refresh}>
+                  Try again
+                </Button>
+              </div>
+            ) : reports.length === 0 ? (
+              <p className="text-sm text-[var(--map-muted)]">
+                {filtered ? "No reports match these filters." : "No reports yet."}
               </p>
+            ) : (
+              <ReportList
+                reports={reports}
+                updatingIds={updatingIds}
+                errors={errors}
+                onStatusChange={changeStatus}
+              />
             )}
-          </div>
+            {hasMore && (
+              <div className="mt-4 flex flex-col items-center gap-2">
+                <Button variant="outline" onClick={loadMore} disabled={loadingMore || loading}>
+                  {loadingMore ? "Loading…" : "Load more"}
+                </Button>
+                {loadMoreError && (
+                  <p role="alert" className="text-sm text-red-300">
+                    {loadMoreError}
+                  </p>
+                )}
+              </div>
+            )}
+          </SidePanel>
         )}
-      </section>
+
+        {panel === "menu" && (
+          <SidePanel title="Menu" onClose={() => setPanel("none")}>
+            <div className="flex flex-col gap-2">
+              <MenuButton
+                icon={<List className="size-4" />}
+                label="All reports"
+                onClick={() => setPanel("list")}
+              />
+              <MenuButton
+                icon={<Filter className="size-4" />}
+                label="Filters"
+                onClick={() => setPanel("filters")}
+              />
+              <MenuButton
+                icon={<RefreshCw className="size-4" />}
+                label={loading && result !== null ? "Refreshing…" : "Refresh data"}
+                onClick={() => {
+                  refresh();
+                  setPanel("none");
+                }}
+              />
+              <p className="mt-2 text-xs text-[var(--map-muted)]">
+                {mode === "demo"
+                  ? "Demo reports only. Status changes stay in this tab."
+                  : mode === "live"
+                    ? `Showing ${counts.total} loaded report${counts.total === 1 ? "" : "s"}.`
+                    : mode === "error"
+                      ? "Data unavailable until reports load."
+                      : "Connecting…"}
+              </p>
+            </div>
+          </SidePanel>
+        )}
+      </div>
+
+      <nav
+        aria-label="Primary"
+        className="z-20 grid grid-cols-3 gap-2 border-t border-white/10 bg-[color-mix(in_oklch,var(--map-panel)_96%,transparent)] px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur-md sm:hidden"
+      >
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-11 flex-col gap-0.5 text-[0.7rem] text-[var(--map-fg)] hover:bg-white/10"
+          aria-pressed={panel === "filters"}
+          onClick={() => togglePanel("filters")}
+        >
+          <Filter className="size-4" />
+          Filters
+        </Button>
+        <Button
+          type="button"
+          className="h-11 bg-[var(--map-accent)] text-[var(--map-accent-fg)] hover:bg-[var(--map-accent)]/90"
+          onClick={() => setReportOpen(true)}
+        >
+          <Plus />
+          Report
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-11 flex-col gap-0.5 text-[0.7rem] text-[var(--map-fg)] hover:bg-white/10"
+          aria-pressed={panel === "list"}
+          onClick={() => togglePanel("list")}
+        >
+          <List className="size-4" />
+          List
+        </Button>
+      </nav>
+
+      {reportOpen && (
+        <ReportWasteSheet open onClose={() => setReportOpen(false)} />
+      )}
     </div>
   );
 }
 
-function summaryNote(mode: Mode, count: number, filtered: boolean, hasMore: boolean): string {
-  if (mode === "loading") return "Loading reports…";
-  if (mode === "error") return "Counts are unavailable until reports load.";
-  if (mode === "demo") return "Counts cover demo reports only.";
-  const scope = filtered ? " matching the current filters" : "";
-  const more = hasMore ? ". More reports exist beyond this page" : "";
-  return `Counts cover the ${count} loaded report${count === 1 ? "" : "s"}${scope}${more}.`;
+function SidePanel({
+  title,
+  onClose,
+  children,
+  wide = false,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  wide?: boolean;
+}) {
+  return (
+    <div className="absolute inset-x-0 bottom-0 z-30 sm:inset-x-auto sm:right-4 sm:bottom-4 sm:top-24">
+      <div
+        className={`flex max-h-[min(75vh,36rem)] flex-col overflow-hidden rounded-t-2xl border border-white/10 bg-[color-mix(in_oklch,var(--map-panel)_96%,transparent)] shadow-xl backdrop-blur-md sm:max-h-full sm:rounded-2xl ${
+          wide ? "sm:w-[28rem]" : "sm:w-[22rem]"
+        }`}
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+          <h2 className="text-base font-semibold text-[var(--map-fg)]">{title}</h2>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="text-[var(--map-fg)] hover:bg-white/10"
+            aria-label={`Close ${title}`}
+            onClick={onClose}
+          >
+            <X />
+          </Button>
+        </div>
+        <div className="overflow-auto p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">{children}</div>
+      </div>
+    </div>
+  );
 }
 
-const BADGES: Record<Mode, { label: string; className: string }> = {
-  loading: { label: "Connecting…", className: "text-muted-foreground" },
-  live: { label: "Live data", className: "border-foreground/30" },
-  demo: { label: "Demo data, not saved", className: "border-dashed text-muted-foreground" },
-  error: { label: "Data unavailable", className: "border-destructive/40 text-destructive" },
-};
-
-function DataSourceBadge({ mode }: { mode: Mode }) {
-  const badge = BADGES[mode];
+function MenuButton({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
   return (
-    <p className={`rounded-full border px-3 py-1 text-xs font-medium ${badge.className}`}>
-      <span className="sr-only">Data source: </span>
-      {badge.label}
-    </p>
+    <button
+      type="button"
+      className="flex h-11 items-center gap-3 rounded-xl border border-white/10 px-3 text-sm text-[var(--map-fg)] hover:bg-white/10"
+      onClick={onClick}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }

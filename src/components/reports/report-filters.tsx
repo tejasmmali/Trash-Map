@@ -10,21 +10,30 @@ type ReportFiltersProps = {
   onChange: (filters: Filters) => void;
   onRefresh: () => void;
   refreshing: boolean;
+  compact?: boolean;
 };
 
-const selectClass =
-  "h-8 rounded-lg border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50";
+export function ReportFilters({
+  filters,
+  onChange,
+  onRefresh,
+  refreshing,
+  compact = false,
+}: ReportFiltersProps) {
+  const selectClass = compact
+    ? "h-11 rounded-lg border border-white/15 bg-black/20 px-3 text-sm text-[var(--map-fg)] outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+    : "h-8 rounded-lg border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50";
+  const labelClass = compact ? "text-[var(--map-muted)]" : "text-muted-foreground";
 
-export function ReportFilters({ filters, onChange, onRefresh, refreshing }: ReportFiltersProps) {
   return (
     <form
       role="search"
       aria-label="Filter reports"
-      className="flex flex-wrap items-end gap-3"
+      className={`flex gap-3 ${compact ? "flex-col" : "flex-wrap items-end"}`}
       onSubmit={(event) => event.preventDefault()}
     >
       <label className="flex flex-col gap-1 text-sm">
-        <span className="text-muted-foreground">Status</span>
+        <span className={labelClass}>Status</span>
         <select
           className={selectClass}
           value={filters.status ?? ""}
@@ -42,7 +51,7 @@ export function ReportFilters({ filters, onChange, onRefresh, refreshing }: Repo
       </label>
 
       <label className="flex flex-col gap-1 text-sm">
-        <span className="text-muted-foreground">Category</span>
+        <span className={labelClass}>Category</span>
         <select
           className={selectClass}
           value={filters.category ?? ""}
@@ -62,7 +71,17 @@ export function ReportFilters({ filters, onChange, onRefresh, refreshing }: Repo
         </select>
       </label>
 
-      <Button type="button" variant="outline" onClick={onRefresh} disabled={refreshing}>
+      <Button
+        type="button"
+        variant="outline"
+        className={
+          compact
+            ? "h-11 border-white/15 bg-transparent text-[var(--map-fg)] hover:bg-white/10"
+            : undefined
+        }
+        onClick={onRefresh}
+        disabled={refreshing}
+      >
         <RefreshCw aria-hidden className={refreshing ? "animate-spin" : undefined} />
         {refreshing ? "Refreshing…" : "Refresh"}
       </Button>

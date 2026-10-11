@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (UI dashboard scaffold, on branch `feat/reports-api`, based on `chore/project-foundation`).
+> Last updated: 2026-10-11 (Natural Earth dotted world heat map, 180×90).
 
 ## Rules for every coding session
 
@@ -81,16 +81,27 @@ src/
     api/classify/            planned: classify an image (preview)
     api/complaints/          planned: draft a complaint
     layout.tsx               root layout, fonts, metadata
-    page.tsx                 renders the reports dashboard
-    globals.css              Tailwind + shadcn theme tokens
+    page.tsx                 full-viewport map-first shell
+    globals.css              Tailwind + shadcn + forest-green map theme tokens
   components/
     ui/                      shadcn components (button.tsx so far)
-    reports/reports-dashboard.tsx  client: header, data-source badge, demo banner, fetching, state
-    reports/report-summary.tsx     summary count cards
-    reports/report-filters.tsx     status/category selects + refresh
-    reports/report-list.tsx        report cards with status buttons and OSM link
+    reports/reports-dashboard.tsx  client: map-first shell, fetch state, panels, demo mode
+    reports/report-summary.tsx     summary count cards (kept; not shown on the map-first home)
+    reports/report-filters.tsx     status/category selects + refresh (compact panel mode)
+    reports/report-list.tsx        report cards with images, status buttons, OSM link
+    reports/report-detail-sheet.tsx  marker/cell detail bottom sheet / floating panel
+    reports/report-waste-sheet.tsx   report submission UI (POST returns 405 until Tejas ships it)
     reports/labels.ts              display labels and date formatting (Asia/Kolkata)
-    map/map-placeholder.tsx        placeholder until the Leaflet map exists
+    map/trash-map.tsx              next/dynamic ssr:false wrapper for MapView
+    map/map-view.tsx               canvas dotted world heat map (no street tiles)
+    map/world-land.ts              generated Natural Earth land masks (180×90, 360×180, 720×360), lat/lng → cell
+    map/map-constants.ts           layer labels, density colors, Mumbai search places
+    map/map-controls.tsx           zoom in/out, locate, layer menu
+    map/map-legend.tsx             density color legend
+    map/map-search.tsx             Mumbai locality search (local place list)
+scripts/
+  land-50m.json                  world-atlas Natural Earth 50m land TopoJSON (regen source)
+  generate-world-land.mjs        rebuilds world-land.ts from land-50m.json (scanline rasterizer)
   lib/
     validation/reports.ts    Zod schemas: the source of truth for shared contracts
     validation/api.ts        Zod schema for API error bodies
@@ -135,18 +146,18 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | `PATCH /api/reports/[id]` (status + `resolved_at`) | Tested (mocked DB only) | Same as above. Real PostgREST behavior of `.neq().maybeSingle()` on update is unverified. |
 | Supabase migration (`reports` table, `report-images` bucket) | Implemented | Not yet applied to a real Supabase project. Blocked on credentials. |
 | Seed data (25 sample reports) | Implemented | Not yet run against a database. |
-| 1. Photo upload | Not started | |
-| 2. Location selection / geolocation | Not started | |
+| 1. Photo upload | In progress (UI only) | Report form collects photo + location + description and POSTs to `/api/reports`. Backend still returns 405; UI surfaces that clearly. |
+| 2. Location selection / geolocation | Implemented (UI) | Map defaults to Mumbai, requests browser geolocation once, recenter control, report form "Use my location". |
 | 3. Gemma classification | Not started | Blocked on `GEMINI_API_KEY` and on verifying a Gemma model id with image input. |
 | 4. Classification schema validation | In progress | Schema defined (`classificationResultSchema`); not yet wired to the model. |
 | 5. Save report + image to Supabase | Not started | Blocked on Supabase credentials. |
-| Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
-| 6. Map with report markers | Not started | Placeholder section on the dashboard. Data source `GET /api/reports` is ready (mocked-DB tested). |
-| 7. Density heat map | Not started | |
-| 8. Delay-weighted heat for unresolved reports | Not started | Proposed formula in section H. |
+| Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Restructured into a map-first shell. Filters/list live in progressive panels. Demo mode and status updates still use `reports-client`. |
+| 6. Map with report markers | Tested (demo mode) | Canvas dotted world map via `next/dynamic` `ssr: false`. No street tiles, no Leaflet at runtime. Natural Earth land mask at 2°/1°/0.5° levels; drag to pan, wheel/pinch/double-click/buttons to zoom, hover highlights a dot with a report-count tooltip, tap a heat dot to open its reports. Contained (not full-bleed) on phones. |
+| 7. Density heat map | Tested (demo mode) | Land cells are muted grey-green dots; trash cells use peach → yellow → coral → red by density and are drawn slightly larger. Buckets follow the active grid level. Driven by report coordinates. |
+| 8. Delay-weighted heat for unresolved reports | Tested (demo mode) | "Unresolved delay" layer uses `weight = min(1, 0.2 + days_open / 14)` from section H. |
 | 9. Complaint drafts | Not started | Contract defined. |
-| 10. Mark as resolved | Implemented | Backend `PATCH /api/reports/[id]` plus per-card status buttons in the dashboard. Not yet run against a real Supabase database. |
-| 11. Sample data | Implemented | See seed row above. |
+| 10. Mark as resolved | Implemented | Backend `PATCH /api/reports/[id]` plus status buttons in detail sheet and report list. Not yet run against a real Supabase database. |
+| 11. Sample data | Implemented | See seed row above. Demo mode still uses `demo-reports.ts` when Supabase is unconfigured. |
 
 ## E. Shared contracts
 
@@ -328,7 +339,7 @@ Open questions:
 | --- | --- | --- |
 | `src/app/api/**`, `src/lib/env.ts`, `src/lib/api-error.ts`, `src/lib/supabase/**`, `src/lib/ai/**` | Tejas | Server-only |
 | `supabase/**` | Tejas | Schema changes need a new migration file, never edits to an applied one |
-| `src/components/**` (except `ui/` generation), `src/app/page.tsx`, `src/app/layout.tsx`, `src/app/globals.css`, `public/**` | Aashish | Includes the dashboard scaffold Tejas built. Restyle or restructure freely |
+| `src/components/**` (except `ui/` generation), `src/app/page.tsx`, `src/app/layout.tsx`, `src/app/globals.css`, `public/**` | Aashish | Includes the map-first UI and the earlier dashboard scaffold. Restyle or restructure freely |
 | `src/components/ui/**` | Aashish | Add components with `npx shadcn@latest add <name>` |
 | `src/lib/reports-client.ts` | **Shared** (Tejas owns API behavior) | Aashish may add UI helpers. Changes to the request or response handling need Tejas |
 | `src/lib/demo-reports.ts` | **Shared** | Demo-only data. Delete it, and the demo branch in `reports-dashboard.tsx`, once Supabase is live if it's no longer wanted |
@@ -398,7 +409,10 @@ Known issues and risks:
 - Build prints a warning about a stray `package-lock.json` in the parent home directory. It comes from the local machine, not the repo, and is harmless.
 - `npm audit` reports 5 high-severity advisories in transitive dev dependencies from the scaffold. Not triaged.
 - npm warns that install scripts for `unrs-resolver`, `protobufjs`, and `@google/genai` are not in `allowScripts`. The build works regardless.
-- `leaflet.heat` is old (0.2.0, a global plugin that patches `L`). It needs to be imported after `leaflet` on the client only.
+- `leaflet.heat` is old (0.2.0, a global plugin that patches `L`). It is installed but unused; the UI draws a discrete canvas grid instead. If soft heat is needed later, import it after `leaflet` on the client only.
+- Street basemap tiles are not used. The visual map is a canvas dotted world grid over a forest-green field. Land comes from Natural Earth 50m (`scripts/land-50m.json`) rasterized into three bit-packed masks in `world-land.ts` (regenerate with `node scripts/generate-world-land.mjs` after `npm install --no-save topojson-client`).
+- The finest grid is 0.5° (~55 km), so every Mumbai report lands in one or two dots. Street-level zoom would need either a finer mask level or a tile basemap.
+- `scripts/land-50m.json` (~545 KB) is committed so the mask can be regenerated offline; it is not shipped to the browser.
 - The SQL migration has not been run against Postgres, so syntax errors there would not have been caught.
 
 ## K. Current progress and next actions
@@ -406,14 +420,13 @@ Known issues and risks:
 Done:
 - Foundation: scaffold, dependencies, shadcn, contracts, env validation, health route, migration, seed, docs.
 - `GET /api/reports` and `PATCH /api/reports/[id]`, with Vitest setup and tests (mocked DB).
-- Dashboard scaffold: summary, filters, report list with status buttons, map placeholder, and labeled demo mode.
+- Dashboard scaffold, then map-first UI: Leaflet map, discrete density grid, markers, layers, search, filters/list panels, report detail sheet, report form shell, forest-green theme, mobile bottom nav, labeled demo mode.
 
-Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-list.tsx`):
-- Visual design: colors, status and category styling, typography, spacing, and a desktop layout (for example, map beside the list).
-- Replace `map-placeholder.tsx` with the Leaflet map, markers, and heat layers (features 6–8), loaded with `next/dynamic` and `ssr: false`.
-- Show report images. `image_url` is already in every `Report`, but cards don't render it yet.
-- Optionally swap the native selects for shadcn components, and add loading skeletons and toasts.
-- Report submission form (feature 1–2 UI) once `POST /api/reports` exists.
+Remaining UI polish for Aashish:
+- Optionally swap native filter selects for shadcn components, and add loading skeletons / toasts.
+- Wire the report form to a live `POST /api/reports` once Tejas ships it (UI already POSTs and handles 405).
+- Optional Nominatim (or similar) search beyond the local Mumbai place list.
+- Complaint-draft UI once `/api/complaints` exists.
 
 Next, in priority order:
 1. **(Tejas) Supabase live:** create the project, apply the migration and seed, and add credentials to `.env.local`. Then verify by hand:
@@ -423,15 +436,49 @@ Next, in priority order:
    - PATCH a pending row to `resolved` twice: `resolved_at` is set once and unchanged the second time.
    - PATCH it back to `pending`: `resolved_at` becomes `null`.
    - PATCH a random UUID: 404.
-2. **(Aashish, in parallel) Map UI:** replace `src/components/map/map-placeholder.tsx` with a Leaflet client component that has markers and a heat layer. Feed it the `reports` array already loaded in `reports-dashboard.tsx`, which works in both demo and live mode.
-3. **(Tejas) AI + create flow:** verify a Gemma model id with image input, build `src/lib/ai/` classification with schema validation, then `POST /api/reports` (upload, classify, insert) and `/api/classify`.
-4. Report form UI (photo, geolocation or map pin, submit). Depends on item 3's contract, which is already defined.
-5. Delay-weighted heat (feature 8) and complaint drafts (feature 9).
-6. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
+2. **(Tejas) AI + create flow:** verify a Gemma model id with image input, build `src/lib/ai/` classification with schema validation, then `POST /api/reports` (upload, classify, insert) and `/api/classify`.
+3. **(Aashish) Connect report form** to the live create endpoint and show returned classification when available.
+4. Complaint drafts (feature 9).
+5. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
 
-Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
+Dependencies: features 3, 5, and 9 need credentials.
 
 ## L. Change log
+
+### 2026-10-11 · Interactive dotted world map: pan, zoom, hover (Aashish)
+- **Summary:** the canvas map now has a camera. Drag to pan, mouse wheel / pinch / double-click / +− buttons to zoom (anchored under the cursor, animated for buttons and `flyTo`). Hovering a land dot enlarges it with a ring and shows a "N reports · tap to open" tooltip; tapping a heat dot opens the detail sheet. Three Natural Earth 50m mask levels (2°, 1°, 0.5°) are picked by dot pitch so zooming reveals more coastline detail while staying dotted. Generator switched to an even-odd scanline rasterizer; antimeridian-crossing rings (Chukotka, Fiji) are split and closed to the pole, which fixed inverted Arctic rows. `MapViewHandle` gains `resetView`; `zoomIn`/`zoomOut` now work. Report form location stays geolocation-only.
+- **Contract impact:** none. API, schemas, and `reports-client` unchanged. `MapControls` gained `onZoomIn`/`onZoomOut` props.
+- **Files:** `src/components/map/map-view.tsx`, `map-controls.tsx`, `world-land.ts` (generated), `reports-dashboard.tsx`, `scripts/generate-world-land.mjs`, `scripts/land-50m.json` (added; `land-110m.json` removed), `PROJECT_CONTEXT.md`.
+- **Checks:** `npm run check` (lint, typecheck, tests). Browser: default world view, wheel zoom to 0.5° dots over Mumbai, hover tooltip "4 reports · tap to open", click opens "4 reports in this area" sheet, zoom survives container resizes.
+- **Known limits:** finest level is 0.5°; no street-level detail. Pointer capture errors are swallowed for synthetic events.
+
+### 2026-10-11 · Natural Earth dotted world mask (Aashish)
+- **Summary:** replaced hand-drawn continent polygons with a rasterized Natural Earth land mask (world-atlas TopoJSON). Canvas draws circular contribution-map dots, not a photo or square tiles. Report form location is geolocation-only (no lat/lng inputs).
+- **Contract impact:** none. Heat still buckets by report lat/lng; API unchanged.
+- **Files:** `src/components/map/world-land.ts`, `map-view.tsx`, `reports-dashboard.tsx`, `report-waste-sheet.tsx`, `scripts/generate-world-land.mjs`, `PROJECT_CONTEXT.md`.
+- **Checks:** sample cells (Mumbai, NYC, London, Tokyo, Sydney, Singapore, Atlantic ocean) verified during mask generation.
+- **Superseded by:** the interactive map entry above (50m source, three levels).
+
+### 2026-10-11 · World land mask accuracy pass (Aashish)
+- **Summary:** refined `world-land.ts` continent outlines and raised the dotted grid to 120×60 so Americas, Europe, Africa, Asia, India, Australia, and islands read more like a real world map. No UI/API changes.
+- **Contract impact:** none.
+- **Files:** `src/components/map/world-land.ts`, `PROJECT_CONTEXT.md`.
+- **Checks:** `npm run typecheck` passed.
+- **Superseded by:** Natural Earth dotted world mask entry above.
+
+### 2026-10-11 · Stylized dotted Mumbai grid map (Aashish)
+- **Summary:** removed street-map tiles. The map is now a forest-green field with a dotted Mumbai land grid (muted grey-green squares). Trash reports tint those squares peach → yellow → coral → red by density. Contained map card (~48vh on phones) instead of full-bleed. Leaflet still handles pan/zoom/geolocation; API contracts unchanged.
+- **Contract impact:** none.
+- **Files:** added `src/components/map/mumbai-land.ts`; modified `density-grid-layer.ts`, `map-view.tsx`, `map-constants.ts`, `map-legend.tsx`, `reports-dashboard.tsx`, `globals.css`, `PROJECT_CONTEXT.md`.
+- **Checks:** `npm run check` (55/55 tests), browser demo check shows land squares + colored heat cells, zero OSM tiles.
+- **Remaining:** live Supabase + `POST /api/reports`, optional land-mask refinement, complaint drafts UI.
+
+### 2026-10-11 · Map-first frontend UI (Aashish)
+- **Summary:** replaced the list-first dashboard and map placeholder with a map-first experience, layers, search, mobile bottom nav, report detail sheet, and report-waste form. Later restyled into the dotted grid (see entry above).
+- **Contract impact:** none.
+- **Files:** map + reports UI components listed in the directory layout; removed `map-placeholder.tsx`.
+- **Checks:** lint/typecheck/tests/build passed at the time of the original map-first pass.
+- **Remaining:** superseded visually by the dotted-grid entry above.
 
 ### 2026-10-11 · Reports dashboard UI scaffold
 - **Summary:** replaced the placeholder landing page with a working dashboard. It has a header with a data-source badge, summary counts, status and category filters with Refresh, report cards (category, status, description, coordinates with an OpenStreetMap link, dates, sample badge, status buttons), "Load more" pagination, and a map placeholder. Demo mode activates only on 503 `CONFIG_MISSING`.
