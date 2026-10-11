@@ -4,7 +4,7 @@ Open-source garbage reporting and heat map for Mumbai, built for **Hacktoberfest
 
 Citizens photograph a garbage pile, pin its location, and an AI model (Gemma via the Gemini API) classifies it. Reports appear on an OpenStreetMap-based map with a heat layer where unresolved reports glow hotter the longer they wait. The app can also draft a complaint to the municipal corporation.
 
-> **Status:** project foundation only. Reporting, the map, and AI classification are not implemented yet. See [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the live status of every feature.
+> **Status:** early. The dashboard lists reports and updates their status through `GET /api/reports` and `PATCH /api/reports/[id]`. Without Supabase credentials it runs in a clearly labeled demo mode. Photo upload, the interactive map, and AI classification are not implemented yet. See [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the live status of every feature.
 
 ## Tech stack
 

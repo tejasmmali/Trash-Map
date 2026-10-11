@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (reports read/resolve API, branch `feat/reports-api`, based on `chore/project-foundation`).
+> Last updated: 2026-10-11 (UI dashboard scaffold, on branch `feat/reports-api`, based on `chore/project-foundation`).
 
 ## Rules for every coding session
 
@@ -80,11 +80,17 @@ src/
     api/reports/[id]/route.ts  PATCH: update status / resolve (implemented)
     api/classify/            planned: classify an image (preview)
     api/complaints/          planned: draft a complaint
-    layout.tsx, page.tsx     minimal landing page (placeholder copy)
+    layout.tsx               root layout, fonts, metadata
+    page.tsx                 renders the reports dashboard
     globals.css              Tailwind + shadcn theme tokens
   components/
     ui/                      shadcn components (button.tsx so far)
-    map/, reports/           planned: Aashish's feature components
+    reports/reports-dashboard.tsx  client: header, data-source badge, demo banner, fetching, state
+    reports/report-summary.tsx     summary count cards
+    reports/report-filters.tsx     status/category selects + refresh
+    reports/report-list.tsx        report cards with status buttons and OSM link
+    reports/labels.ts              display labels and date formatting (Asia/Kolkata)
+    map/map-placeholder.tsx        placeholder until the Leaflet map exists
   lib/
     validation/reports.ts    Zod schemas: the source of truth for shared contracts
     validation/api.ts        Zod schema for API error bodies
@@ -92,6 +98,8 @@ src/
     api-error.ts             server-only helpers for safe JSON error responses
     supabase/server.ts       server-only service-role Supabase client (lazy)
     reports/repository.ts    server-only data access for reports (queries, row validation, DatabaseError)
+    reports-client.ts        browser-side API calls with response validation, counts, filtering, demo status rule
+    demo-reports.ts          6 typed demo reports used only when the API returns 503 CONFIG_MISSING
     ai/                      planned: Gemma classification + complaint drafting
     utils.ts                 shadcn `cn()` helper
   types/reports.ts           TypeScript types inferred from the Zod schemas
@@ -132,11 +140,12 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | 3. Gemma classification | Not started | Blocked on `GEMINI_API_KEY` and on verifying a Gemma model id with image input. |
 | 4. Classification schema validation | In progress | Schema defined (`classificationResultSchema`); not yet wired to the model. |
 | 5. Save report + image to Supabase | Not started | Blocked on Supabase credentials. |
-| 6. Map with report markers | Not started | Backend data source `GET /api/reports` is ready (mocked-DB tested). |
+| Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
+| 6. Map with report markers | Not started | Placeholder section on the dashboard. Data source `GET /api/reports` is ready (mocked-DB tested). |
 | 7. Density heat map | Not started | |
 | 8. Delay-weighted heat for unresolved reports | Not started | Proposed formula in section H. |
 | 9. Complaint drafts | Not started | Contract defined. |
-| 10. Mark as resolved | In progress | Backend `PATCH /api/reports/[id]` implemented and unit tested; UI button not started. |
+| 10. Mark as resolved | Implemented | Backend `PATCH /api/reports/[id]` plus per-card status buttons in the dashboard. Not yet run against a real Supabase database. |
 | 11. Sample data | Implemented | See seed row above. |
 
 ## E. Shared contracts
@@ -227,6 +236,23 @@ Error responses produced by these endpoints:
 | Supabase error, unreachable DB, or a row that fails `reportSchema` | 500 | `{ error: { code: "DATABASE_ERROR", message: "Database request failed" } }` (details are logged server-side only) |
 | Unsupported method | 405 | Empty body (Next.js default) |
 
+**How the dashboard uses the API** (all calls go through `src/lib/reports-client.ts`):
+- `fetchReports(filters, offset)` calls `GET /api/reports` with `status`, `category`, and `offset` when set. It always uses the server's default `limit` (500).
+  - It validates the whole response with `reportSchema`. Any shape mismatch is treated as an error.
+  - It returns one of three results: `ok` (reports + pagination), `config-missing` (only for a **503 whose body code is `CONFIG_MISSING`**), or `error` (with a readable message).
+- Changing a filter or pressing Refresh reloads from offset 0. "Load more" appears when `has_more` is true. It requests `offset = loaded count` and drops duplicate ids.
+- `updateReportStatus(id, status)` sends `PATCH /api/reports/[id]` with `{ status }`. On success the card is replaced with the report the server returned, so `resolved_at` always comes from the server.
+  - On failure the card shows the error message. 404 is shown as "This report no longer exists."
+  - Buttons on that card are disabled while its request is in flight. A ref-based guard also blocks duplicate submits.
+- After a status change, reports that no longer match the active filters disappear from the list, in both live and demo mode.
+- Summary counts are computed from the loaded and filtered reports only, and the note under them says so.
+
+**Demo mode** (`src/lib/demo-reports.ts`):
+- Entered only when `GET /api/reports` returns 503 `CONFIG_MISSING`. Database errors, network errors, and malformed responses show an error state instead, never demo data.
+- Shows 6 built-in reports marked `is_sample: true` with `[SAMPLE]` descriptions. The header badge reads "Demo data, not saved", and a banner explains they are not real submissions.
+- Filters apply on the client. Status changes update only in-memory state, using `applyDemoStatus`, which mirrors the server's rules: resolving sets `resolved_at` to the browser's current time, re-resolving keeps the original, and other statuses clear it. Nothing is persisted, and a page reload resets the data.
+- Limitation: every filter change or refresh still calls the API first. Each call returns 503 quickly, then the dashboard re-enters demo mode with the local demo state preserved.
+
 Errors (every non-2xx response): `{ error: { code, message, details? } }`, where `code` is one of `VALIDATION_ERROR` (400), `NOT_FOUND` (404), `CONFIG_MISSING` (503, `details.missing` lists env var **names**), `AI_UNAVAILABLE` (502), `AI_INVALID_RESPONSE` (502), `STORAGE_ERROR` (500), `DATABASE_ERROR` (500), `INTERNAL_ERROR` (500). Never include secrets or stack traces. Use `apiError()`, `validationError()`, and `handleUnknownError()` from `src/lib/api-error.ts`.
 
 ## F. Database and storage
@@ -278,6 +304,10 @@ Configuration gaps: no Supabase project credentials, no Gemini key, no verified 
 | Re-resolving keeps the original `resolved_at`; other statuses clear it | Idempotent resolve, and it always satisfies the DB check constraint | Overwriting `resolved_at` on every resolve |
 | Resolve uses a conditional update (`neq status resolved`) followed by a lookup when no row matched | Distinguishes "already resolved" from "not found" without a read-before-write race | Read first, then write |
 | DB rows are validated with `reportSchema` before being returned | Schema drift surfaces as a 500 instead of malformed data reaching the UI | Trusting DB output |
+| Demo mode only on 503 `CONFIG_MISSING`, never on other failures | Mock data must never hide a real outage or be mistaken for real submissions | Falling back to demo data on any error |
+| Demo status changes compute `resolved_at` in the browser | There is no server in demo mode. This is the only place the browser sets it, and live mode always uses the server's value | Leaving `resolved_at` null for demo resolves (would break the status/`resolved_at` rule) |
+| Native `<select>` elements for filters instead of a shadcn Select | Accessible, no new dependency, and easy for Aashish to swap later | Adding shadcn `select` now |
+| UI loads data in a client component after mount; `page.tsx` stays a server component | The page needs browser state such as filters and in-flight updates. The static shell still prerenders | Server-side fetch in `page.tsx` (would need request-time rendering and duplicate logic) |
 | Route tests mock `getSupabaseAdmin` with a fake query builder | No DB is available. Tests cover our logic, not PostgREST | Local Supabase via Docker (heavier; still worth adding later) |
 
 **Proposed** delay-weighted heat (not implemented): for unresolved reports, `weight = min(1, 0.2 + days_open / 14)`, so a new report starts at 0.2 and reaches full intensity after about 11 days open. The density layer uses weight 1 for all reports. This is open to change when feature 8 is built.
@@ -298,17 +328,45 @@ Open questions:
 | --- | --- | --- |
 | `src/app/api/**`, `src/lib/env.ts`, `src/lib/api-error.ts`, `src/lib/supabase/**`, `src/lib/ai/**` | Tejas | Server-only |
 | `supabase/**` | Tejas | Schema changes need a new migration file, never edits to an applied one |
-| `src/components/**` (except `ui/` generation), `src/app/page.tsx`, `src/app/layout.tsx`, `src/app/globals.css`, `public/**` | Aashish | |
+| `src/components/**` (except `ui/` generation), `src/app/page.tsx`, `src/app/layout.tsx`, `src/app/globals.css`, `public/**` | Aashish | Includes the dashboard scaffold Tejas built. Restyle or restructure freely |
 | `src/components/ui/**` | Aashish | Add components with `npx shadcn@latest add <name>` |
+| `src/lib/reports-client.ts` | **Shared** (Tejas owns API behavior) | Aashish may add UI helpers. Changes to the request or response handling need Tejas |
+| `src/lib/demo-reports.ts` | **Shared** | Demo-only data. Delete it, and the demo branch in `reports-dashboard.tsx`, once Supabase is live if it's no longer wanted |
 | `src/lib/validation/**`, `src/types/**` | **Shared** | Tejas edits; any change must be announced and logged in section L |
 | `PROJECT_CONTEXT.md`, `README.md`, `package.json` | Shared, coordinated by Tejas | |
 
 Integration rules:
-- Frontend calls the HTTP API in section E with `fetch` and types responses with `@/types/reports`. Until an endpoint exists, the UI can use local fixtures shaped like `Report` (for example copied from `seed.sql`). Keep fixtures out of `src/lib/`.
+- Frontend calls the HTTP API in section E through `src/lib/reports-client.ts` and types data with `@/types/reports`. Mock data lives only in `src/lib/demo-reports.ts`, and only appears in the explicitly labeled demo mode. Don't add other fixtures to production code.
 - Client Components must never import anything with `import "server-only"`.
 - Work on feature branches and open small PRs into `main`.
 
 ## J. Testing and known issues
+
+Verification for the UI dashboard scaffold (2026-10-11, branch `feat/reports-api`):
+- `npm run check` passed: lint clean, typecheck clean, Vitest **55/55 passed** across 4 files. The 16 new tests are in `tests/lib/reports-client.test.ts`. They cover:
+  - Query-string building.
+  - Response validation, including rejection of malformed payloads.
+  - 503 `CONFIG_MISSING` mapping to demo mode, while other 503s and 500s map to error.
+  - Network failure.
+  - The PATCH request shape, and the 404 and non-API-error messages.
+  - Counts and filtering.
+  - The demo status rules.
+  - That the demo data conforms to `Report`.
+- `npm run build` passed. `/` is static (the shell prerenders and data loads on the client).
+- Browser check at a narrow, mobile-like width using `next start`:
+  - **Demo mode (no env vars):**
+    - The badge read "Demo data, not saved" and the banner was shown.
+    - Counts were 6, 4, 1, 1.
+    - The Pending filter showed 4 cards.
+    - Clicking "Mark resolved" moved a card to Resolved, with a resolution time shown.
+    - The loading state showed "Loading reports…".
+  - **Live mode, against a throwaway fake PostgREST server in `/tmp`** (not committed and not real Supabase). The request path was the real supabase-js client, the API route, `reports-client`, and the UI.
+    - The badge read "Live data" and 4 reports were listed.
+    - During an update, that card's buttons were disabled and showed "Updating…". After the update, the card showed the server-provided `resolved_at`.
+    - A simulated failing PATCH showed "Database request failed" on the card, and its buttons re-enabled.
+    - With the fake server stopped, Refresh ended in the error state: "Data unavailable" badge and a "Could not load reports" alert. It did **not** fall back to demo data.
+- Confirmed in the supabase-js source (`postgrest-js` `processResponse`): `maybeSingle()` maps a zero-row array to `data: null`, which is what the repository relies on. This was not confirmed against a live database.
+- **Not run:** anything against a real Supabase database.
 
 Verification for the reports API (2026-10-11, branch `feat/reports-api`):
 - `npm run check` passed: lint clean, typecheck clean, Vitest **39/39 passed** across 3 files.
@@ -332,6 +390,8 @@ Verification performed for the foundation (2026-10-11):
 - Ad-hoc `npx tsx` script against the Zod schemas passed 8/8 cases: valid and invalid classification, form coercion, lat/lng range, a report row with a Postgres-style timestamp, and image type checks. The script was not committed.
 
 Known issues and risks:
+- When the database is unreachable, `GET /api/reports` takes about **7 seconds** to return 500. supabase-js retries GET requests three times, waiting 1 s, 2 s, then 4 s. The dashboard shows "Refreshing…" during that time. Consider disabling or shortening retries in `getSupabaseAdmin()` if that's a problem for the demo. Not changed yet.
+- The UI has no automated component tests. The React components were verified manually in a browser only.
 - Route tests use a fake Supabase builder. They verify which filters and updates we send, not that PostgREST returns what we expect. In particular, these are unverified against a live database: `update().select().maybeSingle()` returning `null` when zero rows match, and the timestamp format. Run the manual checks in section K item 1 once Supabase is configured.
 - `@types/node` was bumped from `^20` to `^24`, because Vitest 5 requires ≥ 22 and the runtime is Node 24.
 - Anyone can change any report's status (no auth, by design). Abuse is possible in a public demo.
@@ -346,6 +406,14 @@ Known issues and risks:
 Done:
 - Foundation: scaffold, dependencies, shadcn, contracts, env validation, health route, migration, seed, docs.
 - `GET /api/reports` and `PATCH /api/reports/[id]`, with Vitest setup and tests (mocked DB).
+- Dashboard scaffold: summary, filters, report list with status buttons, map placeholder, and labeled demo mode.
+
+Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-list.tsx`):
+- Visual design: colors, status and category styling, typography, spacing, and a desktop layout (for example, map beside the list).
+- Replace `map-placeholder.tsx` with the Leaflet map, markers, and heat layers (features 6–8), loaded with `next/dynamic` and `ssr: false`.
+- Show report images. `image_url` is already in every `Report`, but cards don't render it yet.
+- Optionally swap the native selects for shadcn components, and add loading skeletons and toasts.
+- Report submission form (feature 1–2 UI) once `POST /api/reports` exists.
 
 Next, in priority order:
 1. **(Tejas) Supabase live:** create the project, apply the migration and seed, and add credentials to `.env.local`. Then verify by hand:
@@ -355,15 +423,25 @@ Next, in priority order:
    - PATCH a pending row to `resolved` twice: `resolved_at` is set once and unchanged the second time.
    - PATCH it back to `pending`: `resolved_at` becomes `null`.
    - PATCH a random UUID: 404.
-2. **(Aashish, in parallel) Map UI:** a Leaflet client component with markers and a heat layer. It can call `GET /api/reports` now, which returns 503 until Supabase is configured, or use `Report[]` fixtures.
+2. **(Aashish, in parallel) Map UI:** replace `src/components/map/map-placeholder.tsx` with a Leaflet client component that has markers and a heat layer. Feed it the `reports` array already loaded in `reports-dashboard.tsx`, which works in both demo and live mode.
 3. **(Tejas) AI + create flow:** verify a Gemma model id with image input, build `src/lib/ai/` classification with schema validation, then `POST /api/reports` (upload, classify, insert) and `/api/classify`.
 4. Report form UI (photo, geolocation or map pin, submit). Depends on item 3's contract, which is already defined.
-5. Delay-weighted heat (feature 8), resolve button UI (feature 10, which calls `PATCH /api/reports/[id]`), complaint drafts (feature 9).
+5. Delay-weighted heat (feature 8) and complaint drafts (feature 9).
 6. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
 
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · Reports dashboard UI scaffold
+- **Summary:** replaced the placeholder landing page with a working dashboard. It has a header with a data-source badge, summary counts, status and category filters with Refresh, report cards (category, status, description, coordinates with an OpenStreetMap link, dates, sample badge, status buttons), "Load more" pagination, and a map placeholder. Demo mode activates only on 503 `CONFIG_MISSING`.
+- **Contract impact:** none. No changes to schemas, types, the repository, API routes, or the migration. The UI consumes the existing `GET /api/reports` and `PATCH /api/reports/[id]` contracts exactly as documented in section E.
+- **Files:**
+  - Added: `src/components/reports/{reports-dashboard,report-summary,report-filters,report-list}.tsx`, `src/components/reports/labels.ts`, `src/components/map/map-placeholder.tsx`, `src/lib/reports-client.ts`, `src/lib/demo-reports.ts`, `tests/lib/reports-client.test.ts`.
+  - Modified: `src/app/page.tsx`, `PROJECT_CONTEXT.md`.
+- **Why:** give Aashish a functional baseline to restyle, and exercise the reports API end to end.
+- **Checks:** lint, typecheck, 55/55 tests, build, and the browser checks in section J (demo mode, plus live mode against a fake PostgREST).
+- **Remaining:** real Supabase verification, the visual design pass, the Leaflet map, and image display (section K).
 
 ### 2026-10-11 · Reports read and resolution API
 - **Summary:** implemented `GET /api/reports` (filters by status and category, limit/offset pagination with `has_more`) and `PATCH /api/reports/[id]` (status update with consistent `resolved_at`, idempotent resolve, 404 for unknown ids). Added a server-only reports repository that validates every DB row against `reportSchema`, a `DatabaseError` mapped to 500 `DATABASE_ERROR`, a `validationError()` helper, Vitest, and 39 tests.
