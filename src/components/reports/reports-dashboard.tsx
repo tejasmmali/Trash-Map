@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { ClassifyPanel } from "@/components/classify/classify-panel";
 import { MapPlaceholder } from "@/components/map/map-placeholder";
 import { Button } from "@/components/ui/button";
 import { DEMO_REPORTS } from "@/lib/demo-reports";
@@ -161,6 +162,8 @@ export function ReportsDashboard() {
         counts={summarizeReports(reports)}
         note={summaryNote(mode, reports.length, filtered, hasMore)}
       />
+
+      <ClassifyPanel />
 
       <MapPlaceholder />
 

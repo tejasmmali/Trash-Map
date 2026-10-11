@@ -91,6 +91,7 @@ src/
     reports/report-list.tsx        report cards with status buttons and OSM link
     reports/labels.ts              display labels and date formatting (Asia/Kolkata)
     map/map-placeholder.tsx        placeholder until the Leaflet map exists
+    classify/classify-panel.tsx    client: "Classify a photo" test panel (pick image, preview, POST /api/classify, show outcome)
   lib/
     validation/reports.ts    Zod schemas: the source of truth for shared contracts
     validation/api.ts        Zod schema for API error bodies
@@ -99,6 +100,7 @@ src/
     supabase/server.ts       server-only service-role Supabase client (lazy)
     reports/repository.ts    server-only data access for reports (queries, row validation, DatabaseError)
     reports-client.ts        browser-side API calls with response validation, counts, filtering, demo status rule
+    classify-client.ts       browser-side POST /api/classify with a pre-upload file check and response validation
     demo-reports.ts          6 typed demo reports used only when the API returns 503 CONFIG_MISSING
     ai/gemini.ts             server-only lazy GoogleGenAI client + configured model id
     ai/classify-image.ts     server-only prompt, model call, output validation, outcome mapping
@@ -141,6 +143,7 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | 1. Photo upload | Not started | |
 | 2. Location selection / geolocation | Not started | |
 | 3. Gemma classification (`POST /api/classify`) | **Tested (live)** | 49 mocked unit tests, plus 5 real classifications with `gemma-4-26b-a4b-it` on 2026-10-11 that returned the expected outcomes (section J). Not yet wired into report creation. |
+| Classify test panel (UI) | Tested | "Classify a photo" panel on the dashboard, between the summary and the map. Unit tests for `classify-client.ts`; verified in a browser against the live model (section J). |
 | 4. Classification schema validation | **Tested (live)** | All 5 real model outputs passed Zod validation and mapped to valid `ClassifyResponse` shapes. |
 | 5. Save report + image to Supabase | Not started | Blocked on Supabase credentials. |
 | Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
@@ -405,6 +408,15 @@ Integration rules:
 
 ## J. Testing and known issues
 
+Verification for the classify test panel (2026-10-11, branch `feat/ai-classification`):
+- `npm run check` passed: lint clean, typecheck clean, Vitest **113/113** across 6 files. The 9 new tests in `tests/lib/classify-client.test.ts` cover the file pre-check, the multipart request, success and non-garbage outcomes, API error messages, non-API errors, malformed bodies, and network failure (fetch mocked).
+- `npm run build` passed. `/` is still static.
+- Browser check with `next dev` and the live model:
+  - The panel rendered with Classify disabled until a photo was chosen.
+  - Choosing a photo showed a preview and enabled the button. Clicking it showed "Classifying…" and a loading message.
+  - A landfill photo chosen by Tejas returned "Garbage detected", Mixed, High, 95%, with a description.
+- No automated component (React) tests.
+
 **Live Gemini verification (2026-10-11, branch `feat/ai-classification`): succeeded.** `next start` with the real key from `.env.local`, `GEMINI_MODEL=gemma-4-26b-a4b-it`, and one `curl -F image=@… /api/classify` per photo.
 - Test photos: openly licensed images from Wikimedia Commons, downloaded at 1280 px wide to `~/trash-map-test/` (outside the repo, not committed). Licenses and authors are in `~/trash-map-test/SOURCES.txt`. Each was checked by eye before testing.
 
@@ -553,6 +565,15 @@ Next, in priority order:
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · Classify test panel
+- **Summary:** added a "Classify a photo" panel to the dashboard so classification can be tested in the browser. It does a client-side type and size check, shows a preview, posts to `/api/classify`, and shows the outcome (category, severity, and confidence for garbage; confidence and description otherwise) or a safe error. Nothing is saved.
+- **Contract impact:** none. It uses the existing `ClassifyResponse` union and error shape.
+- **Files:**
+  - Added: `src/lib/classify-client.ts`, `src/components/classify/classify-panel.tsx`, `tests/lib/classify-client.test.ts`.
+  - Modified: `src/components/reports/reports-dashboard.tsx` (renders the panel), `PROJECT_CONTEXT.md`.
+- **For Aashish:** this is a functional test panel, not a final design. Restyle it freely, or fold it into the report form once `POST /api/reports` exists.
+- **Checks:** lint, typecheck, 113/113 tests, build, and the browser check against the live model (section J).
 
 ### 2026-10-11 · Live Gemini classification verified
 - **Summary:** with a real key in `.env.local` and `GEMINI_MODEL=gemma-4-26b-a4b-it`, five real photos (Wikimedia Commons, licensed) were classified through `POST /api/classify`. A garbage dump gave `garbage`/`mixed`/`medium`. A clean road and a crowd gave `not_garbage`. Construction debris gave `garbage`/`mixed`/`high`. A heavily blurred photo gave `uncertain` (0.3).
