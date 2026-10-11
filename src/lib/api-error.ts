@@ -3,6 +3,7 @@ import { z } from "zod";
 import { AiInvalidResponseError, AiProviderError, type AiProviderErrorReason } from "@/lib/ai/errors";
 import { ConfigError } from "@/lib/env";
 import { DatabaseError } from "@/lib/reports/repository";
+import { StorageError } from "@/lib/reports/storage";
 import type { ApiError, ApiErrorCode } from "@/types/reports";
 
 export function apiError(
@@ -44,6 +45,9 @@ export function handleUnknownError(error: unknown): Response {
   console.error(error);
   if (error instanceof DatabaseError) {
     return apiError("DATABASE_ERROR", "Database request failed", 500);
+  }
+  if (error instanceof StorageError) {
+    return apiError("STORAGE_ERROR", "Image upload failed", 500);
   }
   if (error instanceof AiProviderError) {
     const { status, message } = AI_PROVIDER_RESPONSES[error.reason];

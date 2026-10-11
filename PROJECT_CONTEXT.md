@@ -141,12 +141,12 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | Supabase migration (`reports` table, `report-images` bucket) | **Applied** | Applied to project `trash-map` on 2026-10-11 and verified by catalog queries (section F). |
 | Seed data (25 sample reports) | **Applied** | 25 rows in `trash-map` (17 pending, 4 in progress, 4 resolved), all `is_sample` and `[SAMPLE]`. |
 | App ↔ Supabase connection | **Tested (live)** | Legacy `service_role` key for `trash-map` in `.env.local`. 22 live API checks passed on 2026-10-11 (section J); the dashboard shows "Live data" with 25 reports. |
-| 1. Photo upload | Not started | |
+| 1. Photo upload | Backend **Tested (live)**; UI not started | `POST /api/reports` accepts the photo, validates it, and stores it in `report-images`. No submission form yet. |
 | 2. Location selection / geolocation | Not started | |
-| 3. Gemma classification (`POST /api/classify`) | **Tested (live)** | 49 mocked unit tests, plus 5 real classifications with `gemma-4-26b-a4b-it` on 2026-10-11 that returned the expected outcomes (section J). Not yet wired into report creation. |
+| 3. Gemma classification (`POST /api/classify`) | **Tested (live)** | 49 mocked unit tests, plus 5 real classifications with `gemma-4-26b-a4b-it` on 2026-10-11 that returned the expected outcomes (section J). Also runs server-side inside `POST /api/reports`. |
 | Classify test panel (UI) | Tested | "Classify a photo" panel on the dashboard, between the summary and the map. Unit tests for `classify-client.ts`; verified in a browser against the live model (section J). |
 | 4. Classification schema validation | **Tested (live)** | All 5 real model outputs passed Zod validation and mapped to valid `ClassifyResponse` shapes. |
-| 5. Save report + image to Supabase | Not started | Schema, bucket, and a working service-role connection exist. Next milestone. |
+| 5. Save report + image to Supabase (`POST /api/reports`) | **Tested (live)** | 32 mocked route tests, plus a live run on 2026-10-11: a garbage photo gave 201 with the row and image in Supabase, and a clean-street photo gave 422 with nothing stored (section J). |
 | Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
 | 6. Map with report markers | Not started | Placeholder section on the dashboard. Data source `GET /api/reports` is ready (mocked-DB tested). |
 | 7. Density heat map | Not started | |
@@ -192,7 +192,7 @@ HTTP API:
 | `GET /api/health` | **Implemented** | none | `200 { ok: true, configured: { supabase: boolean, gemini: boolean } }` |
 | `GET /api/reports` | **Implemented** | query, see below | `200 { reports: Report[], pagination: { limit, offset, has_more } }` |
 | `PATCH /api/reports/[id]` | **Implemented** | JSON `{ status }`, see below | `200 { report: Report }` |
-| `POST /api/reports` | Planned (returns 405 today) | `multipart/form-data`: `image` (File), `latitude`, `longitude`, optional `description` (`createReportFieldsSchema` + `imageFileSchema`) | `201 { report: Report }` |
+| `POST /api/reports` | **Implemented** | `multipart/form-data`: `image` (File), `latitude`, `longitude`, optional `description` (`createReportFieldsSchema` + `imageFileSchema`), see below | `201 { report: Report }` (`CreateReportResponse`) |
 | `POST /api/classify` | **Implemented** | `multipart/form-data`: `image` (File) | `200 ClassifyResponse`, see below |
 | `POST /api/complaints` | Planned | JSON `{ report_id }` (`complaintDraftRequestSchema`) | `200 { draft: { report_id, subject, body, generated_at } }` |
 
@@ -289,6 +289,40 @@ Error responses produced by these endpoints:
 
 - Contract note: `ClassificationResult` is unchanged. `ClassifyResponse` was previously planned as `{ classification }`; it is now the union above, so the UI must switch on `outcome`. No UI code used it yet.
 
+**`POST /api/reports`** (create a report; `src/lib/reports/submit-report.ts`, type `CreateReportResponse`)
+- Request: `multipart/form-data` with `image` (same rules and checks 1–7 as `/api/classify`, via the shared `src/lib/image-upload.ts`), `latitude` (−90 to 90), `longitude` (−180 to 180), and an optional `description` (≤ 1000 chars, trimmed). Example: `curl -F image=@photo.jpg -F latitude=19.0178 -F longitude=72.8478 -F "description=Near the bus stop" http://localhost:3000/api/reports`.
+- Coordinates must be plain decimal strings. Missing, empty, hex (`0x10`), or `Infinity` values are rejected with 400. (They used to be coerced, so a missing value became 0.)
+- **Every other field is ignored.** The server sets `id`, `image_url`, `category`, `confidence`, `ai_analysis`, `status` (`pending`), `resolved_at` (`null`), and `is_sample` (`false`). Client-sent values for these, or a client-side classification, have no effect.
+- Steps, in order:
+  1. Validate the image, then the fields. Nothing below runs if either fails.
+  2. Check that both the Supabase and the Gemini config are present. If not, return 503 `CONFIG_MISSING` listing every missing name, before the model is called.
+  3. Classify the image on the server with `classifyImage()`, the same function `/api/classify` uses.
+  4. Decide by outcome:
+
+     | Outcome | Result |
+     | --- | --- |
+     | `garbage` | Saved. `category`, `confidence`, and `ai_analysis` (the full `ClassificationResult`) come from the model |
+     | `unclear_category` | Saved with `category: "other"`, the model's `confidence`, and `ai_analysis: null` (see section H) |
+     | `not_garbage` | 422 `VALIDATION_ERROR` "This photo doesn't appear to show garbage…", `details: { outcome }`. Nothing uploaded or saved |
+     | `uncertain` | 422 `VALIDATION_ERROR` "We couldn't tell what this photo shows. Upload a clearer, well-lit photo…", `details: { outcome }`. Nothing uploaded or saved |
+
+  5. Generate a UUID with `crypto.randomUUID()`. It is both the report id and the object key `reports/<uuid>.<ext>`, where the extension comes from the **detected** type (`jpg`, `png`, `webp`). The original filename is never used.
+  6. Upload to `SUPABASE_STORAGE_BUCKET` with `upsert: false` and the detected content type, then take the public URL as `image_url`.
+  7. Insert the row and validate it with `reportSchema`.
+- `description`: the user's text if given, otherwise the model's description.
+- Failures (standard error body; no provider, storage, or database messages are passed through):
+
+  | Situation | Status | What happens |
+  | --- | --- | --- |
+  | Image or field validation | 400 / 411 / 413 / 415 | Nothing classified, uploaded, or saved |
+  | Config missing | 503 `CONFIG_MISSING` | Nothing classified, uploaded, or saved |
+  | AI failure | Same as `/api/classify` (502 / 503 / 504) | Nothing uploaded or saved. An AI failure is never treated as a classification |
+  | Upload fails | 500 `STORAGE_ERROR` "Image upload failed" | No row is inserted |
+  | Insert fails | 500 `DATABASE_ERROR` | The uploaded object is removed (best effort). If removal fails too, the error is logged server-side and the client still gets the same safe 500 |
+  | Inserted row fails `reportSchema` | 500 `DATABASE_ERROR` | The image is **kept**, because the row exists and points at it |
+
+- No automatic retries anywhere in this flow, so a request creates at most one object and one row.
+
 **How the dashboard uses the API** (all calls go through `src/lib/reports-client.ts`):
 - `fetchReports(filters, offset)` calls `GET /api/reports` with `status`, `category`, and `offset` when set. It always uses the server's default `limit` (500).
   - It validates the whole response with `reportSchema`. Any shape mismatch is treated as an error.
@@ -306,7 +340,7 @@ Error responses produced by these endpoints:
 - Filters apply on the client. Status changes update only in-memory state, using `applyDemoStatus`, which mirrors the server's rules: resolving sets `resolved_at` to the browser's current time, re-resolving keeps the original, and other statuses clear it. Nothing is persisted, and a page reload resets the data.
 - Limitation: every filter change or refresh still calls the API first. Each call returns 503 quickly, then the dashboard re-enters demo mode with the local demo state preserved.
 
-Errors (every non-2xx response): `{ error: { code, message, details? } }`, where `code` is one of `VALIDATION_ERROR` (400; also 411, 413, 415 on `/api/classify`), `NOT_FOUND` (404), `CONFIG_MISSING` (503, `details.missing` lists env var **names**), `AI_UNAVAILABLE` (502, 503, or 504), `AI_INVALID_RESPONSE` (502), `STORAGE_ERROR` (500), `DATABASE_ERROR` (500), `INTERNAL_ERROR` (500). Never include secrets or stack traces. Use `apiError()`, `validationError()`, and `handleUnknownError()` from `src/lib/api-error.ts`.
+Errors (every non-2xx response): `{ error: { code, message, details? } }`, where `code` is one of `VALIDATION_ERROR` (400; also 411, 413, 415 on the upload endpoints, and 422 for a rejected photo on `POST /api/reports`), `NOT_FOUND` (404), `CONFIG_MISSING` (503, `details.missing` lists env var **names**), `AI_UNAVAILABLE` (502, 503, or 504), `AI_INVALID_RESPONSE` (502), `STORAGE_ERROR` (500), `DATABASE_ERROR` (500), `INTERNAL_ERROR` (500). Never include secrets or stack traces. Use `apiError()`, `validationError()`, and `handleUnknownError()` from `src/lib/api-error.ts`.
 
 ## F. Database and storage
 
@@ -329,7 +363,7 @@ Schema details:
 - Table `public.reports`: the columns in section E. `description`, `confidence`, `resolved_at`, and `ai_analysis` are nullable. Check constraints cover lat/lng range, confidence 0–1, description length, and `(status = 'resolved') = (resolved_at is not null)`.
 - Index `(status, created_at desc)` for the "unresolved, oldest first" heat-map query.
 - RLS is **enabled with no policies**, so anon and authenticated keys can't read or write. Only the service role, used server-side, can.
-- Storage bucket `report-images`: **public read**, 4 MB limit, jpeg/png/webp. Planned object key: `reports/<report-uuid>.<ext>`. Uploads happen server-side only.
+- Storage bucket `report-images`: **public read**, 4 MB limit, jpeg/png/webp. Object key: `reports/<report-uuid>.<ext>`, where the UUID is the report id and the extension comes from the detected image type. Uploads happen server-side only, through `POST /api/reports` (`src/lib/reports/storage.ts`), with `upsert: false`.
   - Why public: the contract says `Report.image_url` is a directly renderable public URL. Every report, including its photo, is already shown to anyone through `GET /api/reports` with no login, so a private bucket with signed URLs would add a contract change without hiding anything.
   - Implications:
     - Anyone with an object URL can view the image.
@@ -337,7 +371,7 @@ Schema details:
     - Deleting a report must also delete its object.
     - Listing the bucket is **not** possible without a storage SELECT policy, and there are none.
   - If photos need to become private later, switch the bucket to private, store the object path, and have the API return short-lived signed URLs. That changes `image_url` semantics, so coordinate it with Aashish.
-  - Status: the bucket exists. No upload has been tested yet, because `POST /api/reports` isn't built.
+  - Status: live upload, public read, and removal verified on 2026-10-11 (section J). The bucket's settings were not changed.
 
 `supabase/seed.sql`: 25 rows across Mumbai with `is_sample = true` and descriptions prefixed `[SAMPLE]`. It has a mix of statuses and ages from 1 to 30 days. Re-runnable, because it deletes only `is_sample` rows first.
 
@@ -403,6 +437,12 @@ Local Gemini configuration (Tejas's machine, 2026-10-11): `.env.local` (git-igno
 | Try JSON mode first, then fall back to prompt-only JSON, cached per model | Structured output is more reliable, but some Gemma models may not support it | JSON mode only (could fail outright); prompt only (less reliable) |
 | Unsupported image input is detected from the provider's 400 message | The SDK has no way to ask a model's capabilities | Hard-coded allowlist of models (goes stale) |
 | Route tests mock `getSupabaseAdmin` with a fake query builder | No DB is available. Tests cover our logic, not PostgREST | Local Supabase via Docker (heavier; still worth adding later) |
+| `POST /api/reports` saves `garbage` and `unclear_category` (as `other`), and rejects `not_garbage` and `uncertain` with 422 | A known pile of unclear type is still worth mapping. A photo that isn't garbage, or can't be read, shouldn't become a report. 422 (not 200) because no report was created | Saving everything; rejecting `unclear_category` |
+| `unclear_category` reports store `ai_analysis: null` | `ai_analysis` must be a full `ClassificationResult` per the contract, and that requires a real `category` and `severity`, which the model didn't give. Storing a made-up one would misrepresent the AI, and storing a partial object would make `GET /api/reports` fail validation for every row | Extending the `Report` contract (not needed for the MVP; can be done later with Aashish) |
+| Upload first, then insert, and remove the object if the insert fails | `image_url` must exist before the row is written, and the column is not nullable | Insert, then upload and update (leaves rows without images on failure) |
+| The image is kept if the inserted row fails `reportSchema` | The row exists and references it; deleting it would leave a row with a broken image | Always removing on any failure |
+| The user's description wins over the model's | The user knows the place; the model's text is the fallback so the field is rarely empty. The model's description stays in `ai_analysis` for `garbage` | Always storing the model's description |
+| Config is checked for both Gemini and Supabase before classifying | Avoids spending a model call when the result can't be saved | Checking lazily on first use |
 
 **Proposed** delay-weighted heat (not implemented): for unresolved reports, `weight = min(1, 0.2 + days_open / 14)`, so a new report starts at 0.2 and reaches full intensity after about 11 days open. The density layer uses weight 1 for all reports. This is open to change when feature 8 is built.
 
@@ -413,13 +453,13 @@ Assumptions:
 
 Open questions:
 - Should complaint drafts target a specific BMC ward, or stay generic?
-- What should `POST /api/reports` do for each classification outcome? Current lean: save `garbage`; save `unclear_category` as category `other`; reject `not_garbage` with 422; reject `uncertain` with 422 and ask for a clearer photo.
+- ~~What should `POST /api/reports` do for each classification outcome?~~ Decided 2026-10-11 as proposed (see the decision table above).
 
 ## I. File ownership and integration boundaries
 
 | Area | Owner | Notes |
 | --- | --- | --- |
-| `src/app/api/**`, `src/lib/env.ts`, `src/lib/api-error.ts`, `src/lib/supabase/**`, `src/lib/ai/**`, `src/lib/image-type.ts` | Tejas | Server-only (`image-type.ts` has no secrets and could be reused client-side) |
+| `src/app/api/**`, `src/lib/env.ts`, `src/lib/api-error.ts`, `src/lib/supabase/**`, `src/lib/ai/**`, `src/lib/reports/**`, `src/lib/image-upload.ts`, `src/lib/image-type.ts` | Tejas | Server-only (`image-type.ts` has no secrets and could be reused client-side) |
 | `supabase/**` | Tejas | Schema changes need a new migration file, never edits to an applied one |
 | `src/components/**` (except `ui/` generation), `src/app/page.tsx`, `src/app/layout.tsx`, `src/app/globals.css`, `public/**` | Aashish | Includes the dashboard scaffold Tejas built. Restyle or restructure freely |
 | `src/components/ui/**` | Aashish | Add components with `npx shadcn@latest add <name>` |
@@ -435,6 +475,33 @@ Integration rules:
 
 ## J. Testing and known issues
 
+**`POST /api/reports` verification (2026-10-11, branch `feat/ai-classification`): succeeded.**
+- `npm run check` passed: lint clean, typecheck clean, Vitest **156/156** across 8 files. `npm run build` passed, and `/api/reports` is dynamic.
+- `tests/api/create-report.test.ts` (32 tests, with Gemini, Storage, and the database all mocked; no credentials or paid calls):
+  - `garbage` gives 201 with a `reportSchema`-valid report. The upload uses `reports/<uuid>.jpg` with `upsert: false`, the id matches the path, and the insert has exactly the server-controlled fields (`pending`, `resolved_at: null`, `is_sample: false`).
+  - Spoofed `category`, `status`, `is_sample`, and `image_url` form fields are ignored. A `../../etc/passwd.jpg` filename never reaches the path.
+  - The user's description wins, a blank one falls back to the model's, and PNG gets `.png` with `image/png`.
+  - `unclear_category` is saved as `other` with `ai_analysis: null`.
+  - `not_garbage` and `uncertain` give 422 with no upload and no query.
+  - Missing, GIF, spoofed, over-4 MB, oversized-by-`Content-Length` (body never read), non-multipart, and malformed images are rejected with no classification and no Supabase client created.
+  - Ten invalid field cases (missing, empty, out-of-range, non-numeric, hex, and infinite coordinates; a long description; a description sent as a file) give 400.
+  - Missing config gives 503 listing both missing names, with no model call.
+  - Three AI failure types give their usual codes, with no upload or insert.
+  - An upload failure gives 500 `STORAGE_ERROR` with no insert.
+  - An insert failure removes the uploaded object. If removal returns an error or throws, the response is still the same safe 500 (no hosts or keys in the body), and the failure is logged server-side.
+  - A contract-breaking inserted row gives 500, and the image is not removed.
+- Mutation checks: removing the cleanup call failed 3 tests, `upsert: true` failed 2, and accepting every outcome failed 2. All passed again after restoring.
+- `tests/validation/reports.test.ts`: 5 new cases confirm coordinates are no longer coerced (missing, empty, hex, infinite, or a non-string).
+- **Live run** against `next dev` with the real `trash-map` project and `gemma-4-26b-a4b-it`, using two deliberate requests:
+  - Baseline by SQL: 25 rows, all samples (17 pending, 4 in progress, 4 resolved), 0 objects in `report-images`. A fingerprint (md5 over id, status, `resolved_at`, and description) of the sample rows was recorded.
+  - `clean-street.jpg` gave **422** `not_garbage` in 3.3 s.
+  - `garbage.jpg` with Dadar coordinates (19.0178, 72.8478), plus spoofed `category=organic`, `status=resolved`, and `is_sample=true` fields, gave **201** in 4.0 s. The report was `mixed`, confidence 0.9, `pending`, `resolved_at: null`, `is_sample: false`, `ai_analysis` filled in, and the user's description kept.
+  - The `image_url` returned 200 `image/jpeg`, and its bytes were identical to the uploaded file.
+  - `GET /api/reports` returned 26 reports with the new one first.
+  - SQL afterwards showed exactly one new row and one object (`reports/<id>.jpg`, `image/jpeg`, 202,652 bytes), so the rejected photo created nothing. The sample counts and fingerprint were unchanged.
+  - **Cleanup:** the test row (matched on its id and `is_sample = false`) and its object were deleted with the service-role client. SQL then showed 25 rows, 0 non-sample rows, 0 objects, and the same sample fingerprint.
+- Not exercised live: `unclear_category` (the model hasn't produced it), the insert-failure cleanup path, and storage failures. These are covered by mocked tests only.
+
 **Live Supabase verification (2026-10-11): succeeded.** Run against `next dev` with the real `service_role` key and project `trash-map`, using an ad-hoc script (`/tmp/tm-live-db.mjs`, not committed). All **22 checks passed**:
 - Reads:
   - `GET /api/reports` returned 25 rows with `has_more: false`, all `is_sample` and `[SAMPLE]`, ordered newest first.
@@ -447,7 +514,7 @@ Integration rules:
 - Confirmed independently by SQL through the connector afterwards: 17 pending, 4 in progress, 4 resolved; the test row is `pending` with `resolved_at` null; 0 non-sample rows.
 - Error safety: `next start` with `NEXT_PUBLIC_SUPABASE_URL` overridden to a non-existent host returned 500 `DATABASE_ERROR` "Database request failed" for GET (after about 7.1 s of supabase-js retries) and for PATCH. The body contained neither the key, the host, nor a stack trace. The server logged `DatabaseError: Failed to list reports` and `Failed to resolve report`.
 - Dashboard (`next dev`, page snapshot): "Data source: Live data", "Counts cover the 25 loaded reports", with the 25 Supabase rows listed.
-- Not exercised live: storage uploads, which need `POST /api/reports`.
+- Storage uploads were later verified through `POST /api/reports` (see above).
 
 Supabase setup (2026-10-11, branch `feat/ai-classification`):
 - **Done through the Supabase connector:**
@@ -581,6 +648,13 @@ Known issues and risks:
   - Each request sends the image inline as base64, which is fine up to 4 MB but not efficient.
   - No retries on provider errors, and no rate limiting of our endpoint, so a public demo could spend API quota.
   - The JSON-mode fallback cache is per server process and resets on restart or a new serverless instance.
+- Report submission known limitations:
+  - If the insert's outcome is ambiguous (for example a network timeout after Postgres actually wrote the row), the cleanup removes the image and the row is left with a broken `image_url`. This is rare, and a reload shows it.
+  - If an inserted row fails `reportSchema` (schema drift), the client gets 500 although the row exists. A retry would create a duplicate report.
+  - If cleanup itself fails, the object is orphaned in the bucket. Look for `Failed to remove orphaned image reports/…` in the server logs.
+  - No duplicate detection, rate limiting, or auth, so anyone can create reports and spend model quota.
+  - Each submission costs one model call (two if the UI also calls `/api/classify` for a preview first).
+  - `unclear_category` reports have no `severity` or `ai_analysis`, so features that need them must handle `null`.
 
 ## K. Current progress and next actions
 
@@ -589,13 +663,14 @@ Done:
 - `GET /api/reports` and `PATCH /api/reports/[id]`, with Vitest setup and tests (mocked DB).
 - Dashboard scaffold: summary, filters, report list with status buttons, map placeholder, and labeled demo mode.
 - `POST /api/classify` with server-only Gemma classification, image validation, and typed errors. Mocked tests plus live verification with `gemma-4-26b-a4b-it`.
+- `POST /api/reports`: server-side validation, classification, storage upload, and insert, with cleanup on failure. Mocked tests plus a live run.
 
 Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-list.tsx`):
 - Visual design: colors, status and category styling, typography, spacing, and a desktop layout (for example, map beside the list).
 - Replace `map-placeholder.tsx` with the Leaflet map, markers, and heat layers (features 6–8), loaded with `next/dynamic` and `ssr: false`.
 - Show report images. `image_url` is already in every `Report`, but cards don't render it yet.
 - Optionally swap the native selects for shadcn components, and add loading skeletons and toasts.
-- Report submission form (feature 1–2 UI) once `POST /api/reports` exists.
+- Report submission form (feature 1–2 UI). `POST /api/reports` is ready (section E).
 
 Next, in priority order:
 1. ~~(Tejas) Supabase live~~ **Done 2026-10-11:** every check below passed (section J). Kept for re-verification on other machines:
@@ -611,14 +686,28 @@ Next, in priority order:
    - Try a few real phone photos from Mumbai in daylight.
    - Decide whether construction rubble should beat `mixed` in the prompt.
    - To re-verify on another machine, put that machine's key in its `.env.local` and repeat the curl steps in section J.
-4. **(Tejas) `POST /api/reports`:** validate the form fields and image the same way `/api/classify` does (consider moving the image checks into a shared helper), call `classifyImage()` on the server, decide per outcome (open question in section H), upload the image to `report-images/reports/<uuid>.<ext>`, insert the row with `ai_analysis` set to the validated `ClassificationResult`, and delete the uploaded object if the insert fails. Return `201 { report }`.
-5. Report form UI (photo, geolocation or map pin, submit). It can call `/api/classify` for a preview now, switching on `outcome`.
+4. ~~(Tejas) `POST /api/reports`~~ **Done 2026-10-11** (section E for the contract, section J for verification).
+5. **(Aashish) Report form UI:** photo, geolocation or map pin, optional description, then `POST /api/reports` as multipart. Show the 422 `message` for rejected photos, and add the returned `report` to the list on 201. Downscale photos over 4 MB first. A `/api/classify` preview is optional and costs an extra model call. A small `createReport()` helper in `src/lib/reports-client.ts` would fit the existing pattern; Tejas can add it.
 6. Delay-weighted heat (feature 8) and complaint drafts (feature 9).
 7. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
 
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · Report submission (`POST /api/reports`)
+- **Summary:** end-to-end report creation. The photo is validated, classified on the server, uploaded to `report-images/reports/<uuid>.<ext>`, and inserted as a pending, non-sample report. `not_garbage` and `uncertain` give 422 with nothing stored. Verified with 32 mocked tests and a live run, and the live test row was cleaned up (section J).
+- **Contract impact:**
+  - `POST /api/reports` is implemented as previously planned (`201 { report }`).
+  - New: 422 `VALIDATION_ERROR` with `details.outcome` for rejected photos, and `STORAGE_ERROR` is now used.
+  - **Behavior change:** `createReportFieldsSchema` no longer coerces coordinates. Missing, empty, hex, or infinite values are rejected instead of becoming numbers (a missing latitude used to become 0).
+  - `unclear_category` reports have `ai_analysis: null`. `Report` and `ClassificationResult` are unchanged.
+- **Files:**
+  - New: `src/lib/image-upload.ts` (image checks shared with `/api/classify`), `src/lib/reports/storage.ts`, `src/lib/reports/submit-report.ts`, `tests/api/create-report.test.ts`.
+  - Changed: `src/app/api/reports/route.ts` (`POST`), `src/app/api/classify/route.ts` (uses the shared helper; same behavior, its 49 tests unchanged), `src/lib/reports/repository.ts` (`insertReport`, exported `parseReport`), `src/lib/api-error.ts` (maps `StorageError`), `src/lib/validation/reports.ts`, `tests/validation/reports.test.ts`, `README.md`.
+  - No dashboard or component files were touched.
+- **For Aashish:** the API is ready for the report form (section K item 5).
+- **Remaining:** the form UI. Optionally, a `createReport()` client helper, and extending the contract so `unclear_category` keeps its partial AI data.
 
 ### 2026-10-11 · Live Supabase verification
 - **Summary:** with the `trash-map` `service_role` key in `.env.local`, the reports API ran against the real database. 22 checks passed: reads, filters, pagination, the resolve, re-resolve, and reopen cycle on one sample row (restored to pending), 404 and 400 cases, and safe 500s on database failure. The dashboard shows live data.

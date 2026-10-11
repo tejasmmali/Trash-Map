@@ -22,7 +22,7 @@ function unwrap(result: QueryResult, action: string): unknown {
   return result.data;
 }
 
-function parseReport(row: unknown): Report {
+export function parseReport(row: unknown): Report {
   const parsed = reportSchema.safeParse(row);
   if (!parsed.success) {
     throw new DatabaseError("Report row does not match the Report contract", {
@@ -55,6 +55,26 @@ export async function listReports(
     reports: rows.slice(0, query.limit).map(parseReport),
     hasMore: rows.length > query.limit,
   };
+}
+
+export type NewReport = Pick<
+  Report,
+  "id" | "image_url" | "latitude" | "longitude" | "category" | "description" | "confidence" | "ai_analysis"
+>;
+
+/**
+ * Inserts a pending, non-sample report and returns the raw row. Throws
+ * DatabaseError only when the insert itself failed (no row was written).
+ */
+export async function insertReport(report: NewReport): Promise<unknown> {
+  return unwrap(
+    await getSupabaseAdmin()
+      .from("reports")
+      .insert({ ...report, status: "pending", resolved_at: null, is_sample: false })
+      .select(REPORT_COLUMNS)
+      .single(),
+    "insert report",
+  );
 }
 
 /**

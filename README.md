@@ -4,7 +4,7 @@ Open-source garbage reporting and heat map for Mumbai, built for **Hacktoberfest
 
 Citizens photograph a garbage pile, pin its location, and an AI model (Gemma via the Gemini API) classifies it. Reports appear on an OpenStreetMap-based map with a heat layer where unresolved reports glow hotter the longer they wait. The app can also draft a complaint to the municipal corporation.
 
-> **Status:** early. The dashboard lists reports and updates their status through `GET /api/reports` and `PATCH /api/reports/[id]`. Without Supabase credentials it runs in a clearly labeled demo mode. `POST /api/classify` classifies a photo with the configured Gemma model (verified live with `gemma-4-26b-a4b-it`). Saving new reports and the interactive map are not implemented yet. See [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the live status of every feature.
+> **Status:** early. The dashboard lists reports and updates their status through `GET /api/reports` and `PATCH /api/reports/[id]`. Without Supabase credentials it runs in a clearly labeled demo mode. `POST /api/classify` classifies a photo with the configured Gemma model (verified live with `gemma-4-26b-a4b-it`). `POST /api/reports` classifies, uploads, and saves a new report (verified live against Supabase). The report form UI and the interactive map are not implemented yet. See [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the live status of every feature.
 
 ## Tech stack
 
@@ -55,6 +55,21 @@ curl http://localhost:3000/api/health
      - 502 `AI_UNAVAILABLE` if the model can't read images or the key is rejected.
      - 502 `AI_INVALID_RESPONSE` if the model's answer is unusable.
    - Full contract: section E of `PROJECT_CONTEXT.md`.
+
+### Submitting a report
+
+With both Supabase and Gemini configured:
+
+```bash
+curl -F image=@photo.jpg -F latitude=19.0178 -F longitude=72.8478 -F "description=Near the bus stop" \
+  http://localhost:3000/api/reports
+```
+
+- The server classifies the photo itself. Category, confidence, status, and every other report field are set by the server, and anything else sent in the form is ignored.
+- `garbage` is saved as reported. `unclear_category` is saved as `other`. The photo goes to `report-images/reports/<report-id>.<ext>`, and the response is `201 { report }`.
+- `not_garbage` and `uncertain` return 422 with a message for the user, and nothing is uploaded or saved.
+- If the database insert fails, the uploaded photo is removed again.
+- Each submission makes one model call.
 
 ## Scripts
 

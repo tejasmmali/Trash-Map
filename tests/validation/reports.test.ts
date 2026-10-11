@@ -74,6 +74,16 @@ describe("createReportFieldsSchema", () => {
       longitude: 72.87,
     });
   });
+
+  it.each([
+    ["missing", { longitude: "72.87" }],
+    ["empty", { latitude: "", longitude: "72.87" }],
+    ["hex", { latitude: "0x10", longitude: "72.87" }],
+    ["infinite", { latitude: "Infinity", longitude: "72.87" }],
+    ["a number instead of a form string", { latitude: 19.07, longitude: 72.87 }],
+  ])("rejects a %s coordinate instead of coercing it", (_label, input) => {
+    expect(createReportFieldsSchema.safeParse(input).success).toBe(false);
+  });
 });
 
 describe("imageFileSchema", () => {

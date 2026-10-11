@@ -90,9 +90,17 @@ export const reportSchema = z.object({
  * Text fields of the multipart POST /api/reports body. The `image` file part
  * is validated separately with `imageFileSchema`.
  */
+// Plain z.coerce.number() turns a missing or empty field into 0 and accepts hex.
+const decimalField = (name: string) =>
+  z
+    .string(`${name} is required`)
+    .trim()
+    .regex(/^[-+]?(\d+(\.\d*)?|\.\d+)$/, `${name} must be a decimal number`)
+    .transform(Number);
+
 export const createReportFieldsSchema = z.object({
-  latitude: z.coerce.number().pipe(latitudeSchema),
-  longitude: z.coerce.number().pipe(longitudeSchema),
+  latitude: decimalField("Latitude").pipe(latitudeSchema),
+  longitude: decimalField("Longitude").pipe(longitudeSchema),
   description: z.string().trim().max(1000).optional(),
 });
 
