@@ -33,7 +33,9 @@ export type ComplaintDraft = z.infer<typeof complaintDraftSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type ApiError = z.infer<typeof apiErrorSchema>;
 
-export type ListReportsResponse = { reports: Report[] };
+export type Pagination = { limit: number; offset: number; has_more: boolean };
+
+export type ListReportsResponse = { reports: Report[]; pagination: Pagination };
 export type CreateReportResponse = { report: Report };
 export type UpdateReportResponse = { report: Report };
 export type ClassifyResponse = { classification: ClassificationResult };

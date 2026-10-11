@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (project foundation, branch `chore/project-foundation`).
+> Last updated: 2026-10-11 (reports read/resolve API, branch `feat/reports-api`, based on `chore/project-foundation`).
 
 ## Rules for every coding session
 
@@ -67,6 +67,7 @@ Collaboration boundaries:
 | AI | Google Gen AI SDK, Gemma model set by env | `@google/genai@2.28` |
 | Validation | Zod 4 | `zod@4.6` |
 | Lint | ESLint 9 flat config (`eslint-config-next`) | |
+| Tests | Vitest, Node environment (`vitest.config.mts`) | `vitest@5.0.3` |
 | Package manager | npm (`package-lock.json`) | |
 
 Directory layout (only folders that exist now, plus planned ones marked):
@@ -75,7 +76,8 @@ Directory layout (only folders that exist now, plus planned ones marked):
 src/
   app/
     api/health/route.ts      GET: reports which integrations are configured (booleans only)
-    api/reports/             planned: list, create, update status
+    api/reports/route.ts     GET: list reports (implemented). POST: create (planned)
+    api/reports/[id]/route.ts  PATCH: update status / resolve (implemented)
     api/classify/            planned: classify an image (preview)
     api/complaints/          planned: draft a complaint
     layout.tsx, page.tsx     minimal landing page (placeholder copy)
@@ -89,6 +91,7 @@ src/
     env.ts                   server-only env validation (throws ConfigError)
     api-error.ts             server-only helpers for safe JSON error responses
     supabase/server.ts       server-only service-role Supabase client (lazy)
+    reports/repository.ts    server-only data access for reports (queries, row validation, DatabaseError)
     ai/                      planned: Gemma classification + complaint drafting
     utils.ts                 shadcn `cn()` helper
   types/reports.ts           TypeScript types inferred from the Zod schemas
@@ -96,10 +99,17 @@ supabase/
   migrations/20261011000000_create_reports.sql
   seed.sql
 public/samples/sample-report.svg   placeholder image used by seed rows
+tests/
+  api/                       route handler tests (Supabase mocked)
+  validation/                Zod contract tests
+  helpers/                   fake Supabase query builder, report row fixture
+  stubs/server-only.ts       empty stand-in for `server-only` under Vitest
+vitest.config.mts
 ```
 
 Server/client boundaries:
-- Every module that reads secrets starts with `import "server-only"` (`env.ts`, `api-error.ts`, `supabase/server.ts`). Importing one from a Client Component fails the build.
+- Every module that reads secrets starts with `import "server-only"` (`env.ts`, `api-error.ts`, `supabase/server.ts`, `reports/repository.ts`). Importing one from a Client Component fails the build.
+- Route handlers stay thin: parse and validate input, call `src/lib/reports/repository.ts`, and map errors with `handleUnknownError()`. Rows read from the database are validated against `reportSchema` before they are returned.
 - **The browser never talks to Supabase directly in the MVP.** All reads and writes go through `/api/*` route handlers using the service-role key. This means no RLS policies to write during the hackathon and no exposed keys.
 - Route handlers that read env or the DB at request time must not be prerendered. With Cache Components, call `await connection()` (from `next/server`) or read the request before touching env/DB. See `api/health/route.ts`.
 - Leaflet touches `window`, so map components must be Client Components loaded with `next/dynamic` and `ssr: false`.
@@ -111,8 +121,10 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Project scaffold (Next.js, TS strict, Tailwind, ESLint, shadcn) | Tested | `npm run check` and `npm run build` pass; `/` returns 200 under `next start`. |
-| Shared contracts (Zod schemas + types) | Tested | Schemas exercised with an ad-hoc `tsx` script (8/8 cases passed). No committed test suite yet. |
+| Shared contracts (Zod schemas + types) | Tested | Covered by `tests/validation/reports.test.ts`. |
 | Env validation + `/api/health` | Tested | With no `.env.local`, `/api/health` returned `{"ok":true,"configured":{"supabase":false,"gemini":false}}`. |
+| `GET /api/reports` (list, filters, pagination) | Tested (mocked DB only) | Unit tests with a fake Supabase client, plus smoke tests against `next start` for 400/503/500 paths. **Never run against a real Supabase database.** |
+| `PATCH /api/reports/[id]` (status + `resolved_at`) | Tested (mocked DB only) | Same as above. Real PostgREST behavior of `.neq().maybeSingle()` on update is unverified. |
 | Supabase migration (`reports` table, `report-images` bucket) | Implemented | Not yet applied to a real Supabase project. Blocked on credentials. |
 | Seed data (25 sample reports) | Implemented | Not yet run against a database. |
 | 1. Photo upload | Not started | |
@@ -120,11 +132,11 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | 3. Gemma classification | Not started | Blocked on `GEMINI_API_KEY` and on verifying a Gemma model id with image input. |
 | 4. Classification schema validation | In progress | Schema defined (`classificationResultSchema`); not yet wired to the model. |
 | 5. Save report + image to Supabase | Not started | Blocked on Supabase credentials. |
-| 6. Map with report markers | Not started | |
+| 6. Map with report markers | Not started | Backend data source `GET /api/reports` is ready (mocked-DB tested). |
 | 7. Density heat map | Not started | |
 | 8. Delay-weighted heat for unresolved reports | Not started | Proposed formula in section H. |
 | 9. Complaint drafts | Not started | Contract defined. |
-| 10. Mark as resolved | Not started | Contract defined; DB constraint keeps `resolved_at` consistent with `status`. |
+| 10. Mark as resolved | In progress | Backend `PATCH /api/reports/[id]` implemented and unit tested; UI button not started. |
 | 11. Sample data | Implemented | See seed row above. |
 
 ## E. Shared contracts
@@ -157,18 +169,65 @@ Enums:
 
 Image rules: JPEG, PNG, or WebP, 1 byte to 4 MB (`MAX_IMAGE_BYTES`). Vercel caps request bodies at 4.5 MB, so the frontend should downscale large photos before upload.
 
-HTTP API. **Planned, not implemented**, except `/api/health`:
+HTTP API:
 
-| Method + path | Request | Success response |
+| Method + path | Status | Request | Success response |
+| --- | --- | --- | --- |
+| `GET /api/health` | **Implemented** | none | `200 { ok: true, configured: { supabase: boolean, gemini: boolean } }` |
+| `GET /api/reports` | **Implemented** | query, see below | `200 { reports: Report[], pagination: { limit, offset, has_more } }` |
+| `PATCH /api/reports/[id]` | **Implemented** | JSON `{ status }`, see below | `200 { report: Report }` |
+| `POST /api/reports` | Planned (returns 405 today) | `multipart/form-data`: `image` (File), `latitude`, `longitude`, optional `description` (`createReportFieldsSchema` + `imageFileSchema`) | `201 { report: Report }` |
+| `POST /api/classify` | Planned | `multipart/form-data`: `image` | `200 { classification: ClassificationResult }` |
+| `POST /api/complaints` | Planned | JSON `{ report_id }` (`complaintDraftRequestSchema`) | `200 { draft: { report_id, subject, body, generated_at } }` |
+
+**`GET /api/reports`** (`listReportsQuerySchema`, type `ListReportsResponse`)
+- Query parameters, all optional:
+  - `status`: one of `pending | in_progress | resolved`.
+  - `category`: one of the five categories.
+  - `limit`: integer 1–500, default **500** (`MAX_REPORTS_PAGE_SIZE`).
+  - `offset`: integer ≥ 0, default 0.
+- Unknown parameters are ignored. An empty value such as `?status=` is invalid and returns 400.
+- Order: `created_at` newest first, then `id` ascending as a tiebreak.
+- `has_more` is true when at least one more row exists after this page. To fetch the next page, use `offset + limit`.
+- Example: `GET /api/reports?status=pending&limit=2` returns
+
+  ```json
+  {
+    "reports": [
+      {
+        "id": "3f1c2b4a-1d2e-4f5a-8b6c-7d8e9f0a1b2c",
+        "image_url": "/samples/sample-report.svg",
+        "latitude": 19.0178, "longitude": 72.8478,
+        "category": "mixed",
+        "description": "[SAMPLE] Overflowing bins outside Dadar station",
+        "confidence": null, "status": "pending",
+        "created_at": "2026-09-29T06:48:00.123456+00:00", "resolved_at": null,
+        "ai_analysis": null, "is_sample": true
+      }
+    ],
+    "pagination": { "limit": 2, "offset": 0, "has_more": true }
+  }
+  ```
+
+**`PATCH /api/reports/[id]`** (`reportIdSchema`, `updateReportStatusSchema`, type `UpdateReportResponse`)
+- `id` must be a UUID. The body must be JSON `{ "status": "pending" | "in_progress" | "resolved" }`.
+- `resolved`: sets `resolved_at` to the server's current time. If the report is already resolved, it is returned unchanged and keeps its original `resolved_at`, so the call is idempotent.
+- `pending` or `in_progress`: sets the status and clears `resolved_at` to `null`. This also reopens a resolved report.
+- Returns 404 `NOT_FOUND` if no report has that id.
+- Example: `PATCH /api/reports/3f1c…1b2c` with `{"status":"resolved"}` returns `200 { "report": { …, "status": "resolved", "resolved_at": "2026-10-11T07:30:00+00:00" } }`.
+
+Error responses produced by these endpoints:
+
+| Situation | Status | Body |
 | --- | --- | --- |
-| `GET /api/health` (**implemented**) | none | `{ ok: true, configured: { supabase: boolean, gemini: boolean } }` |
-| `GET /api/reports?status=` | optional `status` (`listReportsQuerySchema`) | `200 { reports: Report[] }` |
-| `POST /api/reports` | `multipart/form-data`: `image` (File), `latitude`, `longitude`, optional `description` (`createReportFieldsSchema` + `imageFileSchema`) | `201 { report: Report }` |
-| `PATCH /api/reports/[id]` | JSON `{ status }` (`updateReportStatusSchema`) | `200 { report: Report }` |
-| `POST /api/classify` | `multipart/form-data`: `image` | `200 { classification: ClassificationResult }` |
-| `POST /api/complaints` | JSON `{ report_id }` (`complaintDraftRequestSchema`) | `200 { draft: { report_id, subject, body, generated_at } }` |
+| Bad query, id, or body field | 400 | `{ error: { code: "VALIDATION_ERROR", message, details: { formErrors: string[], fieldErrors: { [field]: string[] } } } }` |
+| Body is not JSON | 400 | `{ error: { code: "VALIDATION_ERROR", message: "Request body must be valid JSON" } }` |
+| Unknown report id | 404 | `{ error: { code: "NOT_FOUND", message: "Report not found" } }` |
+| Supabase env vars missing | 503 | `{ error: { code: "CONFIG_MISSING", message, details: { missing: ["NEXT_PUBLIC_SUPABASE_URL", …] } } }` |
+| Supabase error, unreachable DB, or a row that fails `reportSchema` | 500 | `{ error: { code: "DATABASE_ERROR", message: "Database request failed" } }` (details are logged server-side only) |
+| Unsupported method | 405 | Empty body (Next.js default) |
 
-Errors (every non-2xx response): `{ error: { code, message, details? } }`, where `code` is one of `VALIDATION_ERROR` (400), `NOT_FOUND` (404), `CONFIG_MISSING` (503, `details.missing` lists env var **names**), `AI_UNAVAILABLE` (502), `AI_INVALID_RESPONSE` (502), `STORAGE_ERROR` (500), `DATABASE_ERROR` (500), `INTERNAL_ERROR` (500). Never include secrets or stack traces. Use `apiError()` / `handleUnknownError()` from `src/lib/api-error.ts`.
+Errors (every non-2xx response): `{ error: { code, message, details? } }`, where `code` is one of `VALIDATION_ERROR` (400), `NOT_FOUND` (404), `CONFIG_MISSING` (503, `details.missing` lists env var **names**), `AI_UNAVAILABLE` (502), `AI_INVALID_RESPONSE` (502), `STORAGE_ERROR` (500), `DATABASE_ERROR` (500), `INTERNAL_ERROR` (500). Never include secrets or stack traces. Use `apiError()`, `validationError()`, and `handleUnknownError()` from `src/lib/api-error.ts`.
 
 ## F. Database and storage
 
@@ -198,9 +257,9 @@ Variables (see `.env.example`; real values go in `.env.local`, which git ignores
 
 `getSupabaseEnv()` and `getGeminiEnv()` in `src/lib/env.ts` validate these lazily and throw `ConfigError` listing only variable **names**. Nothing calls external services at build time.
 
-Scripts: `dev`, `build`, `start`, `lint`, `typecheck` (`next typegen && tsc --noEmit`), `check` (lint + typecheck). Requires Node ≥ 20.9; developed on Node 24.19 and npm 11.17.
+Scripts: `dev`, `build`, `start`, `lint`, `typecheck` (`next typegen && tsc --noEmit`), `test` (`vitest run`), `test:watch`, `check` (lint + typecheck + test). Requires Node ≥ 20.9; developed on Node 24.19 and npm 11.17.
 
-Configuration gaps: no Supabase project credentials, no Gemini key, no verified Gemma model id. Migration and seed are not applied yet. No test runner.
+Configuration gaps: no Supabase project credentials, no Gemini key, no verified Gemma model id. Migration and seed are not applied yet.
 
 ## H. Decisions and constraints
 
@@ -215,6 +274,11 @@ Configuration gaps: no Supabase project credentials, no Gemini key, no verified 
 | Seed rows use a local placeholder SVG and `is_sample = true` | Clearly fake, and no storage upload needed | Stock photos (licensing, misleading) |
 | Images up to 4 MB, JPEG/PNG/WebP | Fits under Vercel's 4.5 MB request body limit | Direct-to-storage signed uploads (more moving parts) |
 | `is_garbage` is part of the classification output | Lets the API reject non-garbage photos | Trusting every upload |
+| List pagination uses `limit`/`offset` with `has_more` (fetch `limit + 1` rows), max 500, default 500 | The map wants every report in one call. 500 + 1 stays under Supabase's default 1000-row cap | Exact `count` (extra cost), cursor pagination (more complex than needed) |
+| Re-resolving keeps the original `resolved_at`; other statuses clear it | Idempotent resolve, and it always satisfies the DB check constraint | Overwriting `resolved_at` on every resolve |
+| Resolve uses a conditional update (`neq status resolved`) followed by a lookup when no row matched | Distinguishes "already resolved" from "not found" without a read-before-write race | Read first, then write |
+| DB rows are validated with `reportSchema` before being returned | Schema drift surfaces as a 500 instead of malformed data reaching the UI | Trusting DB output |
+| Route tests mock `getSupabaseAdmin` with a fake query builder | No DB is available. Tests cover our logic, not PostgREST | Local Supabase via Docker (heavier; still worth adding later) |
 
 **Proposed** delay-weighted heat (not implemented): for unresolved reports, `weight = min(1, 0.2 + days_open / 14)`, so a new report starts at 0.2 and reaches full intensity after about 11 days open. The density layer uses weight 1 for all reports. This is open to change when feature 8 is built.
 
@@ -246,7 +310,21 @@ Integration rules:
 
 ## J. Testing and known issues
 
-Verification performed on 2026-10-11:
+Verification for the reports API (2026-10-11, branch `feat/reports-api`):
+- `npm run check` passed: lint clean, typecheck clean, Vitest **39/39 passed** across 3 files.
+  - `tests/api/reports.test.ts`: list defaults, filters, pagination and `has_more`, seven invalid-query cases, config missing (503), DB error (500, no driver message leaked), and a contract-breaking row (500).
+  - `tests/api/report-by-id.test.ts`: invalid UUID, non-JSON body, invalid bodies, resolve sets `resolved_at` with the `neq` guard, already-resolved keeps its timestamp, 404 on both paths, reopen clears `resolved_at`, 503, and 500 on update and on lookup failure.
+  - `tests/validation/reports.test.ts`: report, query, classification, form, and image schemas.
+- Mutation check: deleting the `.neq("status", "resolved")` guard made one test fail. Restoring it brought the suite back to 39/39.
+- `npm run build` passed. `/api/reports` and `/api/reports/[id]` are dynamic.
+- Smoke test with `next start` and curl:
+  - No env vars: GET and PATCH returned 503 `CONFIG_MISSING` with variable names only.
+  - Bad query, bad UUID, and non-JSON body each returned 400.
+  - `POST /api/reports` returned 405.
+  - With `NEXT_PUBLIC_SUPABASE_URL` pointing at an unreachable port and a dummy key, the real supabase-js client failed. GET and PATCH returned 500 `DATABASE_ERROR`. Neither the URL nor the key appeared in responses, and the server logged `DatabaseError: Failed to list reports`.
+- **Not run:** any test against a real Supabase database. Real query results, the migration, and the seed are all unverified.
+
+Verification performed for the foundation (2026-10-11):
 - `npm run lint` passed with no warnings.
 - `npm run typecheck` passed.
 - `npm run build` passed. `/` is static, `/api/health` is dynamic.
@@ -254,7 +332,9 @@ Verification performed on 2026-10-11:
 - Ad-hoc `npx tsx` script against the Zod schemas passed 8/8 cases: valid and invalid classification, form coercion, lat/lng range, a report row with a Postgres-style timestamp, and image type checks. The script was not committed.
 
 Known issues and risks:
-- No committed automated tests or test runner yet.
+- Route tests use a fake Supabase builder. They verify which filters and updates we send, not that PostgREST returns what we expect. In particular, these are unverified against a live database: `update().select().maybeSingle()` returning `null` when zero rows match, and the timestamp format. Run the manual checks in section K item 1 once Supabase is configured.
+- `@types/node` was bumped from `^20` to `^24`, because Vitest 5 requires ≥ 22 and the runtime is Node 24.
+- Anyone can change any report's status (no auth, by design). Abuse is possible in a public demo.
 - Build prints a warning about a stray `package-lock.json` in the parent home directory. It comes from the local machine, not the repo, and is harmless.
 - `npm audit` reports 5 high-severity advisories in transitive dev dependencies from the scaffold. Not triaged.
 - npm warns that install scripts for `unrs-resolver`, `protobufjs`, and `@google/genai` are not in `allowScripts`. The build works regardless.
@@ -265,18 +345,40 @@ Known issues and risks:
 
 Done:
 - Foundation: scaffold, dependencies, shadcn, contracts, env validation, health route, migration, seed, docs.
+- `GET /api/reports` and `PATCH /api/reports/[id]`, with Vitest setup and tests (mocked DB).
 
 Next, in priority order:
-1. **(Tejas) Supabase live:** create the project, apply the migration and seed, and add credentials. Then build `GET /api/reports` and `PATCH /api/reports/[id]`. This unblocks the map with real data.
-2. **(Aashish, in parallel) Map UI:** a Leaflet client component with markers and a heat layer, fed with `Report[]` fixtures. Then switch to `GET /api/reports`.
+1. **(Tejas) Supabase live:** create the project, apply the migration and seed, and add credentials to `.env.local`. Then verify by hand:
+   - `curl /api/health` shows `supabase: true`.
+   - `curl /api/reports` returns 25 sample rows with `has_more: false`.
+   - `?status=resolved` returns 4 rows.
+   - PATCH a pending row to `resolved` twice: `resolved_at` is set once and unchanged the second time.
+   - PATCH it back to `pending`: `resolved_at` becomes `null`.
+   - PATCH a random UUID: 404.
+2. **(Aashish, in parallel) Map UI:** a Leaflet client component with markers and a heat layer. It can call `GET /api/reports` now, which returns 503 until Supabase is configured, or use `Report[]` fixtures.
 3. **(Tejas) AI + create flow:** verify a Gemma model id with image input, build `src/lib/ai/` classification with schema validation, then `POST /api/reports` (upload, classify, insert) and `/api/classify`.
 4. Report form UI (photo, geolocation or map pin, submit). Depends on item 3's contract, which is already defined.
-5. Delay-weighted heat (feature 8), resolve button (feature 10), complaint drafts (feature 9).
-6. Add a minimal test runner (for example Vitest) covering the schemas and route handlers.
+5. Delay-weighted heat (feature 8), resolve button UI (feature 10, which calls `PATCH /api/reports/[id]`), complaint drafts (feature 9).
+6. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
 
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · Reports read and resolution API
+- **Summary:** implemented `GET /api/reports` (filters by status and category, limit/offset pagination with `has_more`) and `PATCH /api/reports/[id]` (status update with consistent `resolved_at`, idempotent resolve, 404 for unknown ids). Added a server-only reports repository that validates every DB row against `reportSchema`, a `DatabaseError` mapped to 500 `DATABASE_ERROR`, a `validationError()` helper, Vitest, and 39 tests.
+- **Contract changes (additive, no breaking changes for Aashish):**
+  - `listReportsQuerySchema` gained `category`, `limit` (1–500, default 500), and `offset` (≥ 0, default 0).
+  - `ListReportsResponse` gained `pagination: { limit, offset, has_more }`.
+  - New exports: `reportIdSchema`, `MAX_REPORTS_PAGE_SIZE`, and the `Pagination` type.
+  - The `Report` shape and the SQL schema are unchanged. Every column was audited against `reportSchema` and they match.
+  - Migration note for the frontend: read `body.reports` as before, and optionally use `body.pagination`.
+- **Files:**
+  - Added: `src/app/api/reports/route.ts`, `src/app/api/reports/[id]/route.ts`, `src/lib/reports/repository.ts`, `vitest.config.mts`, `tests/api/reports.test.ts`, `tests/api/report-by-id.test.ts`, `tests/validation/reports.test.ts`, `tests/helpers/{fake-supabase,fixtures}.ts`, `tests/stubs/server-only.ts`.
+  - Modified: `src/lib/validation/reports.ts`, `src/types/reports.ts`, `src/lib/api-error.ts`, `package.json` and `package-lock.json` (added `vitest`, bumped `@types/node` to ^24, added `test` and `test:watch` scripts, `check` now runs tests), `README.md`, `PROJECT_CONTEXT.md`.
+- **Why:** first backend milestone. It unblocks the map (feature 6) and the resolve flow (feature 10).
+- **Checks:** lint, typecheck, 39/39 tests, build, a mutation check, and curl smoke tests for the 503, 400, 405, and 500 paths (section J). No real-database test was run.
+- **Remaining:** apply the migration and seed to Supabase and run the manual checks in section K item 1. The resolve UI is not built.
 
 ### 2026-10-11 · Project foundation
 - **Summary:** initialized a Next.js 16.4 app in the empty repo (it had only `LICENSE`). Added the dependencies, shadcn/ui, shared Zod contracts and types, server-only env validation, the Supabase admin client, an API error helper, `/api/health`, the Supabase migration and seed, `.env.example`, README, and this file.

@@ -74,8 +74,22 @@ export const imageFileSchema = z
     "Image must be JPEG, PNG, or WebP",
   );
 
+export const reportIdSchema = z.uuid();
+
+// Supabase caps responses at 1000 rows by default; the list endpoint fetches
+// limit + 1 rows to compute `has_more`, so keep the max well below that.
+export const MAX_REPORTS_PAGE_SIZE = 500;
+
 export const listReportsQuerySchema = z.object({
   status: reportStatusSchema.optional(),
+  category: reportCategorySchema.optional(),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_REPORTS_PAGE_SIZE)
+    .default(MAX_REPORTS_PAGE_SIZE),
+  offset: z.coerce.number().int().min(0).default(0),
 });
 
 export const updateReportStatusSchema = z.object({

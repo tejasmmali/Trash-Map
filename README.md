@@ -49,7 +49,8 @@ curl http://localhost:3000/api/health
 | `npm run start`     | Serve the production build            |
 | `npm run lint`      | ESLint                                |
 | `npm run typecheck` | Generate route types and run `tsc`    |
-| `npm run check`     | Lint and typecheck                    |
+| `npm run test`      | Run the Vitest suite once             |
+| `npm run check`     | Lint, typecheck, and tests            |
 
 ## Contributing
 
