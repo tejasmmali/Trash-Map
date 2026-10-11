@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (Supabase `trash-map` live: reads and writes verified through the API; branch `feat/ai-classification`, based on `feat/reports-api`).
+> Last updated: 2026-10-11 (square-cell heat map on the dashboard; report submission live; branch `feat/ai-classification`, based on `feat/reports-api`).
 
 ## Rules for every coding session
 
@@ -90,7 +90,9 @@ src/
     reports/report-filters.tsx     status/category selects + refresh
     reports/report-list.tsx        report cards with status buttons and OSM link
     reports/labels.ts              display labels and date formatting (Asia/Kolkata)
-    map/map-placeholder.tsx        placeholder until the Leaflet map exists
+    map/report-map.tsx             client: heat-map section, mode toggle, legend; loads report-heat-map with next/dynamic (ssr: false)
+    map/report-heat-map.tsx        client-only Leaflet map: light OSM tiles + square heat cells (canvas)
+    map/map-placeholder.tsx        unused since the heat map landed; safe to delete
     classify/classify-panel.tsx    client: "Classify a photo" test panel (pick image, preview, POST /api/classify, show outcome)
   lib/
     validation/reports.ts    Zod schemas: the source of truth for shared contracts
@@ -100,6 +102,7 @@ src/
     supabase/server.ts       server-only service-role Supabase client (lazy)
     reports/repository.ts    server-only data access for reports (queries, row validation, DatabaseError)
     reports-client.ts        browser-side API calls with response validation, counts, filtering, demo status rule
+    heat-grid.ts             pure heat-map logic: report weights, square-cell grouping, colour ramp (no Leaflet)
     classify-client.ts       browser-side POST /api/classify with a pre-upload file check and response validation
     demo-reports.ts          6 typed demo reports used only when the API returns 503 CONFIG_MISSING
     ai/gemini.ts             server-only lazy GoogleGenAI client + configured model id
@@ -148,9 +151,9 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | 4. Classification schema validation | **Tested (live)** | All 5 real model outputs passed Zod validation and mapped to valid `ClassifyResponse` shapes. |
 | 5. Save report + image to Supabase (`POST /api/reports`) | **Tested (live)** | 32 mocked route tests, plus a live run on 2026-10-11: a garbage photo gave 201 with the row and image in Supabase, and a clean-street photo gave 422 with nothing stored (section J). |
 | Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
-| 6. Map with report markers | Not started | Placeholder section on the dashboard. Data source `GET /api/reports` is ready (mocked-DB tested). |
-| 7. Density heat map | Not started | |
-| 8. Delay-weighted heat for unresolved reports | Not started | Proposed formula in section H. |
+| 6. Map with reports | Implemented (as heat cells) | Leaflet map on the dashboard. Reports appear as square heat cells with a hover tooltip ("3 reports"); there are no individual markers or popups yet. Verified in a browser with the 25 live reports (section J). |
+| 7. Density heat map | **Tested** | "All reports" mode. Unit tests for the grouping and colours, plus a browser check. |
+| 8. Delay-weighted heat for unresolved reports | **Tested** | "Unresolved" mode, using the formula in section H (now implemented). Unit tests, plus a browser check. |
 | 9. Complaint drafts | Not started | Contract defined. |
 | 10. Mark as resolved | Implemented | Backend `PATCH /api/reports/[id]` plus per-card status buttons in the dashboard. Verified live against `trash-map` through the API. |
 | 11. Sample data | Implemented | See seed row above. |
@@ -444,7 +447,14 @@ Local Gemini configuration (Tejas's machine, 2026-10-11): `.env.local` (git-igno
 | The user's description wins over the model's | The user knows the place; the model's text is the fallback so the field is rarely empty. The model's description stays in `ai_analysis` for `garbage` | Always storing the model's description |
 | Config is checked for both Gemini and Supabase before classifying | Avoids spending a model call when the result can't be saved | Checking lazily on first use |
 
-**Proposed** delay-weighted heat (not implemented): for unresolved reports, `weight = min(1, 0.2 + days_open / 14)`, so a new report starts at 0.2 and reaches full intensity after about 11 days open. The density layer uses weight 1 for all reports. This is open to change when feature 8 is built.
+**Delay-weighted heat (implemented in `src/lib/heat-grid.ts`):** for unresolved reports (`pending` and `in_progress`), `weight = min(1, 0.2 + days_open / 14)`, so a new report starts at 0.2 and reaches full intensity after about 11 days open. Resolved reports weigh 0 in that mode. The density mode uses weight 1 for every report. Days are measured from `created_at` to the browser's current time.
+
+**Heat map design** (2026-10-11):
+- **Square cells, not `leaflet.heat`.** `leaflet.heat` only draws blurred radial blobs, so it can't produce square cells. Each cell is an `L.rectangle` drawn on one shared canvas renderer, which is cheap at the 500-report page size. `leaflet.heat` and `@types/leaflet.heat` are now unused dependencies.
+- **Cells are a fixed 14 px on screen**, with a 1 px gap. They're regrouped in projected pixel space on every zoom, so zooming in splits a hot cell into its parts.
+- **Colour:** a cell's weight sum divided by `max(hottest cell, 3)`, mapped light pink → pink → red → yellow (`HEAT_STOPS`). The floor of 3 stops a lone report from showing as a maximum hotspot.
+- **Base map:** standard OpenStreetMap tiles in grayscale, brightened and at 0.55 opacity over the white page background, matching the app's light theme. No API key and no new dependency. Opacity must use Leaflet's `opacity` option, because Leaflet writes an inline `opacity` that overrides CSS classes.
+- **Data:** the map uses the same `reports` array as the list, so it follows the status and category filters and only covers loaded reports. It fits the map to the reports once on first load and doesn't jump on later filter changes. Scroll-wheel zoom is off so the page scrolls normally; use the +/- buttons, double-click, or pinch.
 
 Assumptions:
 - Mumbai only. The map defaults to center about `19.076, 72.8777`, zoom 11.
@@ -474,6 +484,12 @@ Integration rules:
 - Work on feature branches and open small PRs into `main`.
 
 ## J. Testing and known issues
+
+**Square-cell heat map verification (2026-10-11):**
+- `npm run check` passed: lint, typecheck, Vitest **166/166** across 9 files. `tests/lib/heat-grid.test.ts` has 10 tests: density and delay weights (new, 7 days, capped, resolved, future timestamps), cell grouping and boundaries including negative coordinates, zero-weight skipping, the scale floor, and the colour stops with clamping.
+- `npm run build` passed, and `/` is still statically prerendered.
+- Browser check on `next dev` with live Supabase data (25 sample reports): the map loaded with grayscale tiles on white and pink cells across Mumbai, plus one hotter cell where reports overlap near Dadar. Zooming in regrouped the cells. "Unresolved" hid resolved reports and recoloured by days open. The computed tile style was `brightness(1.12) contrast(0.7) grayscale(1)` at opacity 0.55.
+- Not checked: mobile layout and touch gestures, demo mode visually (it uses the same `reports` array), and behaviour with hundreds of reports in one area.
 
 **`POST /api/reports` verification (2026-10-11, branch `feat/ai-classification`): succeeded.**
 - `npm run check` passed: lint clean, typecheck clean, Vitest **156/156** across 8 files. `npm run build` passed, and `/api/reports` is dynamic.
@@ -637,7 +653,9 @@ Known issues and risks:
 - Build prints a warning about a stray `package-lock.json` in the parent home directory. It comes from the local machine, not the repo, and is harmless.
 - `npm audit` reports 5 high-severity advisories in transitive dev dependencies from the scaffold. Not triaged.
 - npm warns that install scripts for `unrs-resolver`, `protobufjs`, and `@google/genai` are not in `allowScripts`. The build works regardless.
-- `leaflet.heat` is old (0.2.0, a global plugin that patches `L`). It needs to be imported after `leaflet` on the client only.
+- `leaflet.heat` (0.2.0) is no longer used. The square-cell map draws its own cells (section H). Remove it and `@types/leaflet.heat` when convenient.
+- Heat map: OpenStreetMap's public tile servers are fine for a demo, but their usage policy forbids heavy traffic. A real deployment should switch to a tile provider or self-hosted tiles. The attribution must stay visible.
+- Heat map: fast refresh keeps the existing Leaflet map, so changes to the tile layer options need a full page reload in dev.
 - The SQL migration has not been run against Postgres, so syntax errors there would not have been caught.
 - Classification known limitations:
   - Detecting "this model can't read images" and "this model doesn't support JSON mode" relies on matching words in the provider's 400 message. Neither has been seen live, because `gemma-4-26b-a4b-it` supports both. Unmatched cases fall through to the generic 502 `AI_UNAVAILABLE`.
@@ -667,7 +685,7 @@ Done:
 
 Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-list.tsx`):
 - Visual design: colors, status and category styling, typography, spacing, and a desktop layout (for example, map beside the list).
-- Replace `map-placeholder.tsx` with the Leaflet map, markers, and heat layers (features 6–8), loaded with `next/dynamic` and `ssr: false`.
+- The heat map (features 6–8) is in `src/components/map/`. Polish it, and add report popups or markers if wanted.
 - Show report images. `image_url` is already in every `Report`, but cards don't render it yet.
 - Optionally swap the native selects for shadcn components, and add loading skeletons and toasts.
 - Report submission form (feature 1–2 UI). `POST /api/reports` is ready (section E).
@@ -681,19 +699,29 @@ Next, in priority order:
    - PATCH a random UUID: 404.
    - Point the URL at a wrong host temporarily: expect 500 `DATABASE_ERROR` with no URL or key in the body.
    - The dashboard should show "Live data" with 25 reports.
-2. **(Aashish, in parallel) Map UI:** replace `src/components/map/map-placeholder.tsx` with a Leaflet client component that has markers and a heat layer. Feed it the `reports` array already loaded in `reports-dashboard.tsx`, which works in both demo and live mode.
+2. ~~Map UI~~ **Square-cell heat map done 2026-10-11** (Tejas built it at the team's request; section H). Open for Aashish: restyle freely, add clickable cells or markers with report popups, a mobile layout, and delete `map-placeholder.tsx`.
 3. ~~(Tejas) Verify live classification~~ **Done 2026-10-11** (section J). Optional follow-ups:
    - Try a few real phone photos from Mumbai in daylight.
    - Decide whether construction rubble should beat `mixed` in the prompt.
    - To re-verify on another machine, put that machine's key in its `.env.local` and repeat the curl steps in section J.
 4. ~~(Tejas) `POST /api/reports`~~ **Done 2026-10-11** (section E for the contract, section J for verification).
 5. **(Aashish) Report form UI:** photo, geolocation or map pin, optional description, then `POST /api/reports` as multipart. Show the 422 `message` for rejected photos, and add the returned `report` to the list on 201. Downscale photos over 4 MB first. A `/api/classify` preview is optional and costs an extra model call. A small `createReport()` helper in `src/lib/reports-client.ts` would fit the existing pattern; Tejas can add it.
-6. Delay-weighted heat (feature 8) and complaint drafts (feature 9).
+6. Complaint drafts (feature 9). Delay-weighted heat (feature 8) is done.
 7. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
 
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · Square-cell heat map
+- **Summary:** replaced the map placeholder with a Leaflet map. Reports are grouped into small square cells coloured light pink → red → yellow, over a light grayscale OpenStreetMap that matches the white UI. There are two modes: "All reports" (density) and "Unresolved" (heat grows with days open). It has a legend and hover tooltips.
+- **Contract impact:** none. No API, schema, AI, or Supabase changes.
+- **Files:**
+  - New: `src/lib/heat-grid.ts`, `src/components/map/report-map.tsx`, `src/components/map/report-heat-map.tsx`, `tests/lib/heat-grid.test.ts`.
+  - Changed: `src/components/reports/reports-dashboard.tsx` (only the map import and the one JSX line).
+  - `map-placeholder.tsx` is left in place but unused. No new dependencies; `leaflet.heat` is now unused.
+- **For Aashish:** this is your area. Tejas built it because it was requested now. Restyle freely (section K item 2).
+- **Remaining:** clickable report details, mobile polish, and a production tile provider.
 
 ### 2026-10-11 · Report submission (`POST /api/reports`)
 - **Summary:** end-to-end report creation. The photo is validated, classified on the server, uploaded to `report-images/reports/<uuid>.<ext>`, and inserted as a pending, non-sample report. `not_garbage` and `uncertain` give 422 with nothing stored. Verified with 32 mocked tests and a live run, and the live test row was cleaned up (section J).

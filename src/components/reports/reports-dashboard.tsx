@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ClassifyPanel } from "@/components/classify/classify-panel";
-import { MapPlaceholder } from "@/components/map/map-placeholder";
+import { ReportMap } from "@/components/map/report-map";
 import { Button } from "@/components/ui/button";
 import { DEMO_REPORTS } from "@/lib/demo-reports";
 import {
@@ -165,7 +165,7 @@ export function ReportsDashboard() {
 
       <ClassifyPanel />
 
-      <MapPlaceholder />
+      <ReportMap reports={reports} />
 
       <section aria-labelledby="reports-heading" aria-busy={loading} className="flex flex-col gap-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
