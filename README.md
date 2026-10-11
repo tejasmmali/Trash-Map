@@ -4,7 +4,7 @@ Open-source garbage reporting and heat map for Mumbai, built for **Hacktoberfest
 
 Citizens photograph a garbage pile, pin its location, and an AI model (Gemma via the Gemini API) classifies it. Reports appear on an OpenStreetMap-based map with a heat layer where unresolved reports glow hotter the longer they wait. The app can also draft a complaint to the municipal corporation.
 
-> **Status:** early. The dashboard lists reports and updates their status through `GET /api/reports` and `PATCH /api/reports/[id]`. Without Supabase credentials it runs in a clearly labeled demo mode. Photo upload, the interactive map, and AI classification are not implemented yet. See [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the live status of every feature.
+> **Status:** early. The dashboard lists reports and updates their status through `GET /api/reports` and `PATCH /api/reports/[id]`. Without Supabase credentials it runs in a clearly labeled demo mode. `POST /api/classify` classifies a photo with the configured Gemma model (tested with a mocked model only so far). Saving new reports and the interactive map are not implemented yet. See [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the live status of every feature.
 
 ## Tech stack
 
@@ -38,7 +38,23 @@ curl http://localhost:3000/api/health
 ### Gemini
 
 1. Create an API key at [Google AI Studio](https://aistudio.google.com/apikey).
-2. Set `GEMINI_API_KEY` and `GEMINI_MODEL` (a Gemma model id with image input that your key can access).
+2. Set `GEMINI_API_KEY` and `GEMINI_MODEL` (a Gemma model id with image input that your key can access). The key is read on the server only. There is no default model, and the app does not switch models for you.
+3. Try it:
+
+   ```bash
+   curl -F image=@photo.jpg http://localhost:3000/api/classify
+   ```
+
+   - Images must be JPEG, PNG, or WebP and at most 4 MB. The file content is checked, not just the extension.
+   - The response is 200 with an `outcome`:
+     - `garbage`: includes a `classification` with `category`, `severity`, `confidence`, and `description`.
+     - `unclear_category`, `not_garbage`, or `uncertain`: includes `confidence` and `description`.
+   - Nothing is saved.
+   - Errors:
+     - 503 `CONFIG_MISSING` if the variables are unset.
+     - 502 `AI_UNAVAILABLE` if the model can't read images or the key is rejected.
+     - 502 `AI_INVALID_RESPONSE` if the model's answer is unusable.
+   - Full contract: section E of `PROJECT_CONTEXT.md`.
 
 ## Scripts
 

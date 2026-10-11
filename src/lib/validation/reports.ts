@@ -40,6 +40,37 @@ export const classificationResultSchema = z.object({
   severity: severitySchema,
 });
 
+export const CLASSIFICATION_OUTCOMES = [
+  "garbage",
+  "unclear_category",
+  "not_garbage",
+  "uncertain",
+] as const;
+
+const nonGarbageOutcome = <T extends Exclude<(typeof CLASSIFICATION_OUTCOMES)[number], "garbage">>(
+  outcome: T,
+) =>
+  z.object({
+    outcome: z.literal(outcome),
+    confidence: z.number().min(0).max(1),
+    description: z.string().trim().min(1).max(500),
+  });
+
+/**
+ * Body of a successful POST /api/classify. Only `garbage` carries a full
+ * ClassificationResult (the shape later stored in `reports.ai_analysis`); the
+ * other outcomes tell the UI to ask for a different photo.
+ */
+export const classifyResponseSchema = z.discriminatedUnion("outcome", [
+  z.object({
+    outcome: z.literal("garbage"),
+    classification: classificationResultSchema.extend({ is_garbage: z.literal(true) }),
+  }),
+  nonGarbageOutcome("unclear_category"),
+  nonGarbageOutcome("not_garbage"),
+  nonGarbageOutcome("uncertain"),
+]);
+
 export const reportSchema = z.object({
   id: z.uuid(),
   image_url: z.string().min(1),

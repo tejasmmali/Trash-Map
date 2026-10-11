@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type {
   classificationResultSchema,
+  classifyResponseSchema,
   complaintDraftRequestSchema,
   complaintDraftSchema,
   createReportFieldsSchema,
@@ -38,5 +39,6 @@ export type Pagination = { limit: number; offset: number; has_more: boolean };
 export type ListReportsResponse = { reports: Report[]; pagination: Pagination };
 export type CreateReportResponse = { report: Report };
 export type UpdateReportResponse = { report: Report };
-export type ClassifyResponse = { classification: ClassificationResult };
+export type ClassifyResponse = z.infer<typeof classifyResponseSchema>;
+export type ClassificationOutcome = ClassifyResponse["outcome"];
 export type ComplaintDraftResponse = { draft: ComplaintDraft };

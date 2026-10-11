@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (UI dashboard scaffold, on branch `feat/reports-api`, based on `chore/project-foundation`).
+> Last updated: 2026-10-11 (AI image classification, on branch `feat/ai-classification`, based on `feat/reports-api`).
 
 ## Rules for every coding session
 
@@ -78,7 +78,7 @@ src/
     api/health/route.ts      GET: reports which integrations are configured (booleans only)
     api/reports/route.ts     GET: list reports (implemented). POST: create (planned)
     api/reports/[id]/route.ts  PATCH: update status / resolve (implemented)
-    api/classify/            planned: classify an image (preview)
+    api/classify/route.ts    POST: classify an uploaded image (implemented; saves nothing)
     api/complaints/          planned: draft a complaint
     layout.tsx               root layout, fonts, metadata
     page.tsx                 renders the reports dashboard
@@ -100,7 +100,10 @@ src/
     reports/repository.ts    server-only data access for reports (queries, row validation, DatabaseError)
     reports-client.ts        browser-side API calls with response validation, counts, filtering, demo status rule
     demo-reports.ts          6 typed demo reports used only when the API returns 503 CONFIG_MISSING
-    ai/                      planned: Gemma classification + complaint drafting
+    ai/gemini.ts             server-only lazy GoogleGenAI client + configured model id
+    ai/classify-image.ts     server-only prompt, model call, output validation, outcome mapping
+    ai/errors.ts             server-only AiProviderError (with reason) and AiInvalidResponseError
+    image-type.ts            detects JPEG/PNG/WebP from magic bytes (no dependencies)
     utils.ts                 shadcn `cn()` helper
   types/reports.ts           TypeScript types inferred from the Zod schemas
 supabase/
@@ -116,7 +119,7 @@ vitest.config.mts
 ```
 
 Server/client boundaries:
-- Every module that reads secrets starts with `import "server-only"` (`env.ts`, `api-error.ts`, `supabase/server.ts`, `reports/repository.ts`). Importing one from a Client Component fails the build.
+- Every module that reads secrets starts with `import "server-only"` (`env.ts`, `api-error.ts`, `supabase/server.ts`, `reports/repository.ts`, `ai/*.ts`). Importing one from a Client Component fails the build.
 - Route handlers stay thin: parse and validate input, call `src/lib/reports/repository.ts`, and map errors with `handleUnknownError()`. Rows read from the database are validated against `reportSchema` before they are returned.
 - **The browser never talks to Supabase directly in the MVP.** All reads and writes go through `/api/*` route handlers using the service-role key. This means no RLS policies to write during the hackathon and no exposed keys.
 - Route handlers that read env or the DB at request time must not be prerendered. With Cache Components, call `await connection()` (from `next/server`) or read the request before touching env/DB. See `api/health/route.ts`.
@@ -137,8 +140,8 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | Seed data (25 sample reports) | Implemented | Not yet run against a database. |
 | 1. Photo upload | Not started | |
 | 2. Location selection / geolocation | Not started | |
-| 3. Gemma classification | Not started | Blocked on `GEMINI_API_KEY` and on verifying a Gemma model id with image input. |
-| 4. Classification schema validation | In progress | Schema defined (`classificationResultSchema`); not yet wired to the model. |
+| 3. Gemma classification (`POST /api/classify`) | Tested (mocked model only) | 49 unit tests with the SDK mocked. Real API reached only with an invalid key (auth error mapped correctly). **No successful live classification yet:** needs `GEMINI_API_KEY` and a verified image-capable `GEMINI_MODEL`. |
+| 4. Classification schema validation | Tested (mocked model only) | Model output is validated with Zod and mapped to the `ClassifyResponse` union. Not yet wired into report creation. |
 | 5. Save report + image to Supabase | Not started | Blocked on Supabase credentials. |
 | Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
 | 6. Map with report markers | Not started | Placeholder section on the dashboard. Data source `GET /api/reports` is ready (mocked-DB tested). |
@@ -186,7 +189,7 @@ HTTP API:
 | `GET /api/reports` | **Implemented** | query, see below | `200 { reports: Report[], pagination: { limit, offset, has_more } }` |
 | `PATCH /api/reports/[id]` | **Implemented** | JSON `{ status }`, see below | `200 { report: Report }` |
 | `POST /api/reports` | Planned (returns 405 today) | `multipart/form-data`: `image` (File), `latitude`, `longitude`, optional `description` (`createReportFieldsSchema` + `imageFileSchema`) | `201 { report: Report }` |
-| `POST /api/classify` | Planned | `multipart/form-data`: `image` | `200 { classification: ClassificationResult }` |
+| `POST /api/classify` | **Implemented** | `multipart/form-data`: `image` (File) | `200 ClassifyResponse`, see below |
 | `POST /api/complaints` | Planned | JSON `{ report_id }` (`complaintDraftRequestSchema`) | `200 { draft: { report_id, subject, body, generated_at } }` |
 
 **`GET /api/reports`** (`listReportsQuerySchema`, type `ListReportsResponse`)
@@ -236,6 +239,52 @@ Error responses produced by these endpoints:
 | Supabase error, unreachable DB, or a row that fails `reportSchema` | 500 | `{ error: { code: "DATABASE_ERROR", message: "Database request failed" } }` (details are logged server-side only) |
 | Unsupported method | 405 | Empty body (Next.js default) |
 
+**`POST /api/classify`** (`classifyResponseSchema`, type `ClassifyResponse`)
+- A preview endpoint. It **never saves the image or creates a report.**
+- Request: `multipart/form-data` with one field, `image`: JPEG, PNG, or WebP, 1 byte to 4 MB. Example: `curl -F image=@photo.jpg http://localhost:3000/api/classify`.
+- Input checks, in order:
+  1. The content type must be multipart (otherwise 415).
+  2. A `Content-Length` header is required (otherwise 411).
+  3. A body larger than 4 MB + 64 KB is rejected with 413 before it is read.
+  4. A malformed multipart body returns 400.
+  5. A file over 4 MB returns 413.
+  6. A missing image, or a declared type outside JPEG/PNG/WebP, returns 400.
+  7. The file's magic bytes must be a real JPEG/PNG/WebP **and** match the declared type (otherwise 400). This stops renamed or spoofed files.
+- Success is always 200 with one of four shapes, discriminated by `outcome`:
+
+  | `outcome` | Meaning | Body |
+  | --- | --- | --- |
+  | `garbage` | Garbage with a known category | `{ outcome, classification: ClassificationResult }` with `is_garbage: true` |
+  | `unclear_category` | Garbage, but the type can't be told | `{ outcome, confidence, description }` |
+  | `not_garbage` | The photo doesn't show garbage | `{ outcome, confidence, description }` |
+  | `uncertain` | The model can't decide, **or** its confidence was below 0.5 (`MIN_CONFIDENCE`) | `{ outcome, confidence, description }` |
+
+  Example: `{ "outcome": "garbage", "classification": { "is_garbage": true, "category": "plastic", "confidence": 0.86, "description": "Plastic bags and bottles piled beside a road.", "severity": "medium" } }`.
+- How the model is called (`src/lib/ai/classify-image.ts`):
+  - The model is whatever `GEMINI_MODEL` names, with no fallback.
+  - The prompt goes in the user message, because some Gemma models don't support system instructions. Settings are temperature 0.1, 512 output tokens and a 30 s timeout.
+  - The first attempt asks for JSON output with a schema. If the API rejects JSON mode for that model, the call is retried once without it, and the model is remembered for the life of the process.
+  - The model returns `{ verdict, category, severity, confidence, description }`, which is validated with Zod. A garbage verdict must name a category (or `"unclear"`), and a known category needs a severity.
+  - Text around the JSON, such as a Markdown fence, is tolerated. Anything else is rejected as an invalid response.
+- Classification-specific errors (all use the standard error body; nothing from the provider is passed through):
+
+  | Situation | Status | Code and message |
+  | --- | --- | --- |
+  | Not multipart | 415 | `VALIDATION_ERROR` |
+  | No `Content-Length` | 411 | `VALIDATION_ERROR` |
+  | Image too large | 413 | `VALIDATION_ERROR` "Image must be 4 MB or smaller" |
+  | Bad, missing, or spoofed image | 400 | `VALIDATION_ERROR` |
+  | `GEMINI_API_KEY` or `GEMINI_MODEL` missing | 503 | `CONFIG_MISSING` with `details.missing`. The model is not called |
+  | Model can't read images | 502 | `AI_UNAVAILABLE` "The configured AI model cannot read images. Set GEMINI_MODEL to an image-capable model." |
+  | Model id not found | 502 | `AI_UNAVAILABLE` "…was not found. Check GEMINI_MODEL." |
+  | Key rejected | 502 | `AI_UNAVAILABLE` "The AI provider rejected the server's credentials." |
+  | Provider rate limit (429) | 503 | `AI_UNAVAILABLE` "The AI service is busy. Try again shortly." |
+  | Timeout (30 s) | 504 | `AI_UNAVAILABLE` |
+  | Other provider or network failure | 502 | `AI_UNAVAILABLE` |
+  | Empty, non-JSON, or schema-violating model output | 502 | `AI_INVALID_RESPONSE` "The AI returned an unusable result. Try again or use a different photo." |
+
+- Contract note: `ClassificationResult` is unchanged. `ClassifyResponse` was previously planned as `{ classification }`; it is now the union above, so the UI must switch on `outcome`. No UI code used it yet.
+
 **How the dashboard uses the API** (all calls go through `src/lib/reports-client.ts`):
 - `fetchReports(filters, offset)` calls `GET /api/reports` with `status`, `category`, and `offset` when set. It always uses the server's default `limit` (500).
   - It validates the whole response with `reportSchema`. Any shape mismatch is treated as an error.
@@ -253,7 +302,7 @@ Error responses produced by these endpoints:
 - Filters apply on the client. Status changes update only in-memory state, using `applyDemoStatus`, which mirrors the server's rules: resolving sets `resolved_at` to the browser's current time, re-resolving keeps the original, and other statuses clear it. Nothing is persisted, and a page reload resets the data.
 - Limitation: every filter change or refresh still calls the API first. Each call returns 503 quickly, then the dashboard re-enters demo mode with the local demo state preserved.
 
-Errors (every non-2xx response): `{ error: { code, message, details? } }`, where `code` is one of `VALIDATION_ERROR` (400), `NOT_FOUND` (404), `CONFIG_MISSING` (503, `details.missing` lists env var **names**), `AI_UNAVAILABLE` (502), `AI_INVALID_RESPONSE` (502), `STORAGE_ERROR` (500), `DATABASE_ERROR` (500), `INTERNAL_ERROR` (500). Never include secrets or stack traces. Use `apiError()`, `validationError()`, and `handleUnknownError()` from `src/lib/api-error.ts`.
+Errors (every non-2xx response): `{ error: { code, message, details? } }`, where `code` is one of `VALIDATION_ERROR` (400; also 411, 413, 415 on `/api/classify`), `NOT_FOUND` (404), `CONFIG_MISSING` (503, `details.missing` lists env var **names**), `AI_UNAVAILABLE` (502, 503, or 504), `AI_INVALID_RESPONSE` (502), `STORAGE_ERROR` (500), `DATABASE_ERROR` (500), `INTERNAL_ERROR` (500). Never include secrets or stack traces. Use `apiError()`, `validationError()`, and `handleUnknownError()` from `src/lib/api-error.ts`.
 
 ## F. Database and storage
 
@@ -279,7 +328,7 @@ Variables (see `.env.example`; real values go in `.env.local`, which git ignores
 | `SUPABASE_SERVICE_ROLE_KEY` | **server only** | DB + storage |
 | `SUPABASE_STORAGE_BUCKET` | server | Defaults to `report-images` |
 | `GEMINI_API_KEY` | **server only** | Classification, complaint drafts |
-| `GEMINI_MODEL` | server | Gemma model id; no default on purpose |
+| `GEMINI_MODEL` | server | Gemma model id **with image input**; no default on purpose. If the model can't read images, `/api/classify` returns 502 instead of switching models |
 
 `getSupabaseEnv()` and `getGeminiEnv()` in `src/lib/env.ts` validate these lazily and throw `ConfigError` listing only variable **names**. Nothing calls external services at build time.
 
@@ -308,6 +357,12 @@ Configuration gaps: no Supabase project credentials, no Gemini key, no verified 
 | Demo status changes compute `resolved_at` in the browser | There is no server in demo mode. This is the only place the browser sets it, and live mode always uses the server's value | Leaving `resolved_at` null for demo resolves (would break the status/`resolved_at` rule) |
 | Native `<select>` elements for filters instead of a shadcn Select | Accessible, no new dependency, and easy for Aashish to swap later | Adding shadcn `select` now |
 | UI loads data in a client component after mount; `page.tsx` stays a server component | The page needs browser state such as filters and in-flight updates. The static shell still prerenders | Server-side fetch in `page.tsx` (would need request-time rendering and duplicate logic) |
+| `/api/classify` returns 200 with four `outcome` values instead of a 4xx for non-garbage | "Not garbage" and "uncertain" are valid answers, not client errors, and the UI needs a different message for each | 422 for non-garbage; a single `{ classification }` shape (forces a fake category) |
+| Confidence below 0.5 becomes `uncertain` | Avoids presenting a weak guess as a classification | Trusting any confidence |
+| Image type is checked from magic bytes, not just the declared type | Clients control the declared MIME type | Trusting `File.type`; adding a file-type dependency |
+| Large bodies are rejected from `Content-Length` before `formData()` | Avoids buffering oversized uploads in memory | Reading first, then checking size |
+| Try JSON mode first, then fall back to prompt-only JSON, cached per model | Structured output is more reliable, but some Gemma models may not support it | JSON mode only (could fail outright); prompt only (less reliable) |
+| Unsupported image input is detected from the provider's 400 message | The SDK has no way to ask a model's capabilities | Hard-coded allowlist of models (goes stale) |
 | Route tests mock `getSupabaseAdmin` with a fake query builder | No DB is available. Tests cover our logic, not PostgREST | Local Supabase via Docker (heavier; still worth adding later) |
 
 **Proposed** delay-weighted heat (not implemented): for unresolved reports, `weight = min(1, 0.2 + days_open / 14)`, so a new report starts at 0.2 and reaches full intensity after about 11 days open. The density layer uses weight 1 for all reports. This is open to change when feature 8 is built.
@@ -318,15 +373,15 @@ Assumptions:
 - Anyone can mark a report resolved (no auth).
 
 Open questions:
-- Which Gemma model id is available with image input on the team's key? Verify before building feature 3.
+- Which Gemma model id is available with image input on the team's key? Must be verified with a real key before the demo.
 - Should complaint drafts target a specific BMC ward, or stay generic?
-- Should non-garbage photos (`is_garbage = false`) be rejected with 400 or saved as category `other`? Current lean: reject.
+- What should `POST /api/reports` do for each classification outcome? Current lean: save `garbage`; save `unclear_category` as category `other`; reject `not_garbage` with 422; reject `uncertain` with 422 and ask for a clearer photo.
 
 ## I. File ownership and integration boundaries
 
 | Area | Owner | Notes |
 | --- | --- | --- |
-| `src/app/api/**`, `src/lib/env.ts`, `src/lib/api-error.ts`, `src/lib/supabase/**`, `src/lib/ai/**` | Tejas | Server-only |
+| `src/app/api/**`, `src/lib/env.ts`, `src/lib/api-error.ts`, `src/lib/supabase/**`, `src/lib/ai/**`, `src/lib/image-type.ts` | Tejas | Server-only (`image-type.ts` has no secrets and could be reused client-side) |
 | `supabase/**` | Tejas | Schema changes need a new migration file, never edits to an applied one |
 | `src/components/**` (except `ui/` generation), `src/app/page.tsx`, `src/app/layout.tsx`, `src/app/globals.css`, `public/**` | Aashish | Includes the dashboard scaffold Tejas built. Restyle or restructure freely |
 | `src/components/ui/**` | Aashish | Add components with `npx shadcn@latest add <name>` |
@@ -341,6 +396,22 @@ Integration rules:
 - Work on feature branches and open small PRs into `main`.
 
 ## J. Testing and known issues
+
+Verification for AI classification (2026-10-11, branch `feat/ai-classification`):
+- `npm run check` passed: lint clean, typecheck clean, Vitest **104/104 passed** across 5 files. The 49 new tests in `tests/api/classify.test.ts` mock `GoogleGenAI` but keep the SDK's real `ApiError`. No real key is used and no paid call is made. They cover:
+  - Input validation: missing image, text field instead of a file, GIF, spoofed content, declared type differing from the real type, 4 MB + 1 byte (413), oversized `Content-Length` rejected without reading the body, missing `Content-Length` (411), JSON body (415), malformed multipart (400).
+  - All four outcomes, all five categories, WebP input, downgrade of low-confidence garbage to `uncertain`, and JSON wrapped in a Markdown fence. The garbage test also checks the request sent to the SDK: model id, inline base64 image, JSON mode, and abort signal.
+  - Eleven kinds of invalid model output plus an empty response, each giving 502 `AI_INVALID_RESPONSE`.
+  - Missing config gives 503 with no model call. Provider 429, 401, "API key" 400, 404, image-modality 400 and 500 each map correctly, as does a network failure. Responses are checked to contain no key, internal IP address from the provider message, or stack trace.
+  - The JSON-mode fallback, and that it is cached per model.
+  - `detectImageType` for each accepted format, plus GIF and a non-WebP RIFF file (AVI), which must return `null`.
+- Mutation check: disabling the magic-byte check and removing the low-confidence downgrade made 3 tests fail. Restoring them brought the file back to 49/49.
+- `npm run build` passed. `/api/classify` is dynamic.
+- Smoke test with `next start` and curl:
+  - No Gemini env: a valid JPEG returned 503 `CONFIG_MISSING` listing `GEMINI_API_KEY` and `GEMINI_MODEL`.
+  - A GIF, an HTML file named `.png`, a text field, a JSON body, and a 4.3 MB file returned 400, 400, 400, 415, and 413.
+  - **Against the real Gemini API with a deliberately invalid key** (`GEMINI_MODEL=gemma-3-27b-it`): the client got 502 `AI_UNAVAILABLE` "The AI provider rejected the server's credentials." Google reports a bad key as **HTTP 400** "API key not valid", and the mapping handles it. The raw provider body appeared only in the server log.
+- **Not run:** any successful live classification. No valid `GEMINI_API_KEY` was available, so prompt quality, real JSON-mode support, Gemma image support, and real error messages for unsupported models are all unverified.
 
 Verification for the UI dashboard scaffold (2026-10-11, branch `feat/reports-api`):
 - `npm run check` passed: lint clean, typecheck clean, Vitest **55/55 passed** across 4 files. The 16 new tests are in `tests/lib/reports-client.test.ts`. They cover:
@@ -400,6 +471,13 @@ Known issues and risks:
 - npm warns that install scripts for `unrs-resolver`, `protobufjs`, and `@google/genai` are not in `allowScripts`. The build works regardless.
 - `leaflet.heat` is old (0.2.0, a global plugin that patches `L`). It needs to be imported after `leaflet` on the client only.
 - The SQL migration has not been run against Postgres, so syntax errors there would not have been caught.
+- Classification known limitations:
+  - Detecting "this model can't read images" and "this model doesn't support JSON mode" relies on matching words in the provider's 400 message. The patterns are guesses until a real unsupported model is tried; unmatched cases fall through to the generic 502 `AI_UNAVAILABLE`.
+  - The 30 s timeout path (504) has no automated test.
+  - Model confidence is self-reported and not calibrated. The 0.5 threshold is a starting point.
+  - Each request sends the image inline as base64, which is fine up to 4 MB but not efficient.
+  - No retries on provider errors, and no rate limiting of our endpoint, so a public demo could spend API quota.
+  - The JSON-mode fallback cache is per server process and resets on restart or a new serverless instance.
 
 ## K. Current progress and next actions
 
@@ -407,6 +485,7 @@ Done:
 - Foundation: scaffold, dependencies, shadcn, contracts, env validation, health route, migration, seed, docs.
 - `GET /api/reports` and `PATCH /api/reports/[id]`, with Vitest setup and tests (mocked DB).
 - Dashboard scaffold: summary, filters, report list with status buttons, map placeholder, and labeled demo mode.
+- `POST /api/classify` with server-only Gemma classification, image validation, and typed errors (mocked model tests).
 
 Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-list.tsx`):
 - Visual design: colors, status and category styling, typography, spacing, and a desktop layout (for example, map beside the list).
@@ -424,14 +503,29 @@ Next, in priority order:
    - PATCH it back to `pending`: `resolved_at` becomes `null`.
    - PATCH a random UUID: 404.
 2. **(Aashish, in parallel) Map UI:** replace `src/components/map/map-placeholder.tsx` with a Leaflet client component that has markers and a heat layer. Feed it the `reports` array already loaded in `reports-dashboard.tsx`, which works in both demo and live mode.
-3. **(Tejas) AI + create flow:** verify a Gemma model id with image input, build `src/lib/ai/` classification with schema validation, then `POST /api/reports` (upload, classify, insert) and `/api/classify`.
-4. Report form UI (photo, geolocation or map pin, submit). Depends on item 3's contract, which is already defined.
-5. Delay-weighted heat (feature 8) and complaint drafts (feature 9).
-6. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
+3. **(Tejas) Verify live classification:** put a real `GEMINI_API_KEY` and a candidate Gemma id in `.env.local`, then `curl -F image=@photo.jpg localhost:3000/api/classify` with a garbage photo, a clean street, and a blurry photo. Check the outcomes. If the model can't read images, the response says so; pick another id. Tune the prompt or `MIN_CONFIDENCE` if needed.
+4. **(Tejas) `POST /api/reports`:** validate the form fields and image the same way `/api/classify` does (consider moving the image checks into a shared helper), call `classifyImage()` on the server, decide per outcome (open question in section H), upload the image to `report-images/reports/<uuid>.<ext>`, insert the row with `ai_analysis` set to the validated `ClassificationResult`, and delete the uploaded object if the insert fails. Return `201 { report }`.
+5. Report form UI (photo, geolocation or map pin, submit). It can call `/api/classify` for a preview now, switching on `outcome`.
+6. Delay-weighted heat (feature 8) and complaint drafts (feature 9).
+7. Optional: integration tests against a local Supabase (`supabase start`) to cover real PostgREST behavior.
 
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · AI image classification
+- **Summary:** added `POST /api/classify`. It validates a multipart image (size, declared type, and magic bytes), sends it to the model named by `GEMINI_MODEL` through `@google/genai`, validates the JSON output with Zod, and returns one of four outcomes: `garbage`, `unclear_category`, `not_garbage`, or `uncertain`. It saves nothing. Provider and output failures map to typed errors with safe messages.
+- **Contract changes:**
+  - New `CLASSIFICATION_OUTCOMES` and `classifyResponseSchema` in `src/lib/validation/reports.ts`.
+  - `ClassifyResponse` in `src/types/reports.ts` changed from the planned `{ classification }` to the discriminated union in section E, and a `ClassificationOutcome` type was added. Nothing used the old shape.
+  - `ClassificationResult`, `Report`, the reports endpoints, the repository, and the migration are unchanged.
+  - For Aashish: when building the upload form, switch on `outcome`; only `garbage` has a `classification` object.
+- **Files:**
+  - Added: `src/app/api/classify/route.ts`, `src/lib/ai/{gemini,classify-image,errors}.ts`, `src/lib/image-type.ts`, `tests/api/classify.test.ts`.
+  - Modified: `src/lib/validation/reports.ts`, `src/types/reports.ts`, `src/lib/api-error.ts` (maps the AI errors), `README.md`, `PROJECT_CONTEXT.md`.
+- **Why:** MVP features 3 and 4, and the building block for `POST /api/reports`.
+- **Checks:** lint, typecheck, 104/104 tests, build, a mutation check, and curl smoke tests, including one against the real API with an invalid key (section J). No successful live classification was run.
+- **Remaining:** verify with a real key and an image-capable Gemma id, then build `POST /api/reports` (section K).
 
 ### 2026-10-11 · Reports dashboard UI scaffold
 - **Summary:** replaced the placeholder landing page with a working dashboard. It has a header with a data-source badge, summary counts, status and category filters with Refresh, report cards (category, status, description, coordinates with an OpenStreetMap link, dates, sample badge, status buttons), "Load more" pagination, and a map placeholder. Demo mode activates only on 503 `CONFIG_MISSING`.
