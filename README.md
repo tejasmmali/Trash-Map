@@ -31,9 +31,9 @@ curl http://localhost:3000/api/health
 ### Supabase
 
 1. Create a Supabase project.
-2. Run `supabase/migrations/20261011000000_create_reports.sql` in the SQL editor (or `supabase db push` with the Supabase CLI). This creates the `reports` table and the public `report-images` storage bucket.
+2. Run `supabase/migrations/20261011083327_create_reports.sql` in the SQL editor (or `supabase db push` with the Supabase CLI). This creates the `reports` table and the public `report-images` storage bucket.
 3. Optionally run `supabase/seed.sql` to load 25 clearly marked sample reports across Mumbai.
-4. Copy the project URL and service-role key into `.env.local`.
+4. Copy the project URL and the **secret** key (`sb_secret_…`, or the legacy `service_role` key) into `.env.local`. A publishable or `anon` key is rejected, because it can't read the table.
 
 ### Gemini
 

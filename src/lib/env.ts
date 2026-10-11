@@ -8,9 +8,24 @@ export class ConfigError extends Error {
   }
 }
 
+// RLS has no policies, so a publishable or anon key would silently read zero rows.
+function isPrivilegedSupabaseKey(key: string): boolean {
+  if (key.startsWith("sb_publishable_")) return false;
+  const parts = key.split(".");
+  if (parts.length !== 3) return true;
+  try {
+    const payload: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return typeof payload === "object" && payload !== null && "role" in payload
+      ? payload.role === "service_role"
+      : true;
+  } catch {
+    return true;
+  }
+}
+
 const supabaseEnvSchema = z.object({
   NEXT_PUBLIC_SUPABASE_URL: z.url(),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).refine(isPrivilegedSupabaseKey),
   SUPABASE_STORAGE_BUCKET: z.string().min(1).default("report-images"),
 });
 
