@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (live Gemini verification blocked on credentials, on branch `feat/ai-classification`, based on `feat/reports-api`).
+> Last updated: 2026-10-11 (live Gemini classification verified with `gemma-4-26b-a4b-it`, on branch `feat/ai-classification`, based on `feat/reports-api`).
 
 ## Rules for every coding session
 
@@ -140,8 +140,8 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | Seed data (25 sample reports) | Implemented | Not yet run against a database. |
 | 1. Photo upload | Not started | |
 | 2. Location selection / geolocation | Not started | |
-| 3. Gemma classification (`POST /api/classify`) | Tested (mocked model only) · **Blocked** for live verification | 49 unit tests with the SDK mocked. Real API reached only with an invalid key (auth error mapped correctly). **No successful live classification yet.** Blocked on a valid `GEMINI_API_KEY` and on real test photos (section K item 3). `GEMINI_MODEL` is set locally to `gemma-4-26b-a4b-it`, not yet verified against the account. |
-| 4. Classification schema validation | Tested (mocked model only) | Model output is validated with Zod and mapped to the `ClassifyResponse` union. Not yet wired into report creation. |
+| 3. Gemma classification (`POST /api/classify`) | **Tested (live)** | 49 mocked unit tests, plus 5 real classifications with `gemma-4-26b-a4b-it` on 2026-10-11 that returned the expected outcomes (section J). Not yet wired into report creation. |
+| 4. Classification schema validation | **Tested (live)** | All 5 real model outputs passed Zod validation and mapped to valid `ClassifyResponse` shapes. |
 | 5. Save report + image to Supabase | Not started | Blocked on Supabase credentials. |
 | Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
 | 6. Map with report markers | Not started | Placeholder section on the dashboard. Data source `GET /api/reports` is ready (mocked-DB tested). |
@@ -334,12 +334,16 @@ Variables (see `.env.example`; real values go in `.env.local`, which git ignores
 
 Scripts: `dev`, `build`, `start`, `lint`, `typecheck` (`next typegen && tsc --noEmit`), `test` (`vitest run`), `test:watch`, `check` (lint + typecheck + test). Requires Node ≥ 20.9; developed on Node 24.19 and npm 11.17.
 
-Configuration gaps: no Supabase project credentials, no Gemini key, no verified Gemma model id. Migration and seed are not applied yet.
+Configuration gaps: no Supabase project credentials. Migration and seed are not applied yet.
 
-Local Gemini configuration (2026-10-11): `.env.local` exists (git-ignored) with `GEMINI_MODEL=gemma-4-26b-a4b-it` and an **empty** `GEMINI_API_KEY`, so `/api/classify` still returns 503 `CONFIG_MISSING` until Tejas fills in the key.
-- Model choice: Google's "Run Gemma with the Gemini API" page (ai.google.dev/gemma/docs/core/gemma_on_gemini_api, checked 2026-10-11) lists exactly two Gemma models on the Gemini API, `gemma-4-26b-a4b-it` and `gemma-4-31b-it`. The Gemma 4 model card says both take text and image input. `26b-a4b` is a mixture-of-experts model (about 4B active parameters), so it should be faster; `31b-it` is the fallback.
-- Not verified: that this account can use the model, that it accepts **inline** base64 images (Google's example uploads through the Files API instead), and whether it supports JSON mode. The JSON-mode fallback in `classify-image.ts` covers the last point.
-- `gemma-3-27b-it`, used in the earlier invalid-key smoke test, is not on Google's current list. That test failed on the key before the model was checked, so it says nothing about the model.
+Local Gemini configuration (Tejas's machine, 2026-10-11): `.env.local` (git-ignored, never committed) holds a valid `GEMINI_API_KEY` and `GEMINI_MODEL=gemma-4-26b-a4b-it`. `/api/health` reports `gemini: true`. Any other machine or deployment needs its own key in its own env.
+- Model choice: Google's "Run Gemma with the Gemini API" page (ai.google.dev/gemma/docs/core/gemma_on_gemini_api, checked 2026-10-11) lists exactly two Gemma models on the Gemini API, `gemma-4-26b-a4b-it` and `gemma-4-31b-it`. Both take text and image input. `26b-a4b` is a mixture-of-experts model (about 4B active parameters), so it should be faster.
+- Verified with the real key:
+  - The models endpoint returned 200 for both ids, with `generateContent` supported.
+  - `gemma-4-26b-a4b-it` accepts **inline** base64 images, which is what our code sends (Google's docs example uses the Files API instead).
+  - It accepts JSON mode (`responseMimeType` + `responseJsonSchema`), so the prompt-only fallback is not needed for this model.
+  - `gemma-4-31b-it` was not tried for classification.
+- No model default was added to the code. The id lives only in env.
 
 ## H. Decisions and constraints
 
@@ -378,7 +382,6 @@ Assumptions:
 - Anyone can mark a report resolved (no auth).
 
 Open questions:
-- Does `gemma-4-26b-a4b-it` work with inline images and the team's key? Google's docs say it takes images; it still has to be verified with a real key before the demo.
 - Should complaint drafts target a specific BMC ward, or stay generic?
 - What should `POST /api/reports` do for each classification outcome? Current lean: save `garbage`; save `unclear_category` as category `other`; reject `not_garbage` with 422; reject `uncertain` with 422 and ask for a clearer photo.
 
@@ -402,7 +405,29 @@ Integration rules:
 
 ## J. Testing and known issues
 
-Live Gemini verification attempt (2026-10-11, branch `feat/ai-classification`): **stopped, no live request made.**
+**Live Gemini verification (2026-10-11, branch `feat/ai-classification`): succeeded.** `next start` with the real key from `.env.local`, `GEMINI_MODEL=gemma-4-26b-a4b-it`, and one `curl -F image=@… /api/classify` per photo.
+- Test photos: openly licensed images from Wikimedia Commons, downloaded at 1280 px wide to `~/trash-map-test/` (outside the repo, not committed). Licenses and authors are in `~/trash-map-test/SOURCES.txt`. Each was checked by eye before testing.
+
+  | Photo (source) | What it shows | Actual response | Time |
+  | --- | --- | --- | --- |
+  | `garbage.jpg` ("Cattle feeding at rubbish dump outside Byculla station(east)", CC0) | Night-time roadside dump in Mumbai with what look like onion skins and plastic; cows feeding | 200 `garbage`: category `mixed`, severity `medium`, confidence 0.9, "There is a pile of organic waste and scattered plastic litter on the ground near the animals." | 6.0 s |
+  | `clean-street.jpg` ("Palm Beach Road, Belapur, Navi Mumbai", CC BY-SA 3.0) | Clean multi-lane road, no visible litter | 200 `not_garbage`: confidence 1, "A wide, clean asphalt road with vehicles and tall buildings in the background under a hazy sky." | 4.9 s |
+  | `construction-debris.jpg` ("Marine Drive Mumbai", CC BY-SA 4.0) | Marine Drive skyline at night; foreground is a large pile of rubble, wood, drums, and sacks | 200 `garbage`: category `mixed`, severity `high`, confidence 0.95, "A large pile of mixed debris, including construction rubble, wood, and various discarded items…" | 5.9 s |
+  | `ambiguous-blurred-garbage.jpg` (made locally from `garbage.jpg` by shrinking it to 40 px and back up with `sips`) | Unrecognizable dark blur | 200 `uncertain`: confidence 0.3, "The image is extremely dark and blurry, making it impossible to identify any objects…" | 4.1 s |
+  | `crowd-motion-blur.jpg` ("BlurryUnderground", CC0) | Motion-blurred crowd in a London station, no litter | 200 `not_garbage`: confidence 1, "…busy train station concourse with many people… No garbage or litter is visible." | 4.9 s |
+
+- All five responses matched the `ClassifyResponse` union. The server's `classifyResponseSchema.parse` would have returned 502 otherwise. The outcomes `garbage`, `not_garbage`, and `uncertain` were seen live; `unclear_category` was not triggered by any photo and is covered only by mocked tests.
+- Observation: the construction-debris pile was labelled `mixed`, not `construction`. That's defensible, since it contains drums and sacks too, but the prompt may need a clearer rule if construction waste should take priority.
+- Error paths with the live config:
+  - GIF, an HTML file named `.png`, a real JPEG declared as PNG, a 4.3 MB file, and a JSON body returned 400, 400, 400, 413, and 415. None reached the provider.
+  - Overriding `GEMINI_MODEL=gemma-does-not-exist` returned 502 `AI_UNAVAILABLE` "The configured AI model was not found. Check GEMINI_MODEL." The provider's 404 appeared only in the server log.
+- One extra text-only `generateContent` call with `responseMimeType: "application/json"` and a schema returned `{"ok": true}`. JSON mode works on this model.
+- Nothing saved: the classify route and `src/lib/ai/*` contain no storage, database, or file-write calls (checked with `grep`). `git status` was clean after the runs, and Supabase is not configured.
+- Key safety: the key was never printed; checks reported only whether it was set and its length. A scan of `.next/static` (client bundles) for Google's `AIza` key prefix found nothing. `.env.local` is git-ignored and untracked.
+- Requests made to Google in this session: 2 model-metadata lookups (no generation), 5 image classifications, 1 failed request with a bogus model id, and 1 tiny text call. No retries.
+- `npm run check` passed (lint, typecheck, Vitest **104/104**, still fully mocked; Vitest does not read `.env.local`). `npm run build` passed. No live integration test was added to the suite; the procedure above is manual.
+
+Earlier live Gemini verification attempt (2026-10-11, same branch): **stopped, no live request made.**
 - `.env.local` did not exist, and neither `GEMINI_API_KEY` nor `GEMINI_MODEL` was in the shell environment. Checked by testing whether each variable was set, without printing values.
 - The repo has no real photos to test with. The only image is `public/samples/sample-report.svg`, which `/api/classify` doesn't accept (SVG).
 - `npm run check` passed again (lint, typecheck, Vitest 104/104, all mocked) with `.env.local` present. `npm run build` passed. Vitest doesn't load `.env.local`; the tests set their own env values.
@@ -483,7 +508,9 @@ Known issues and risks:
 - `leaflet.heat` is old (0.2.0, a global plugin that patches `L`). It needs to be imported after `leaflet` on the client only.
 - The SQL migration has not been run against Postgres, so syntax errors there would not have been caught.
 - Classification known limitations:
-  - Detecting "this model can't read images" and "this model doesn't support JSON mode" relies on matching words in the provider's 400 message. The patterns are guesses until a real unsupported model is tried; unmatched cases fall through to the generic 502 `AI_UNAVAILABLE`.
+  - Detecting "this model can't read images" and "this model doesn't support JSON mode" relies on matching words in the provider's 400 message. Neither has been seen live, because `gemma-4-26b-a4b-it` supports both. Unmatched cases fall through to the generic 502 `AI_UNAVAILABLE`.
+  - Live latency was 4–6 s per image. The UI should show a loading state.
+  - Live behavior was checked on only 5 images. Accuracy on real Mumbai user photos (daylight, phone cameras, partial piles) is untested.
   - The 30 s timeout path (504) has no automated test.
   - Model confidence is self-reported and not calibrated. The 0.5 threshold is a starting point.
   - Each request sends the image inline as base64, which is fine up to 4 MB but not efficient.
@@ -496,7 +523,7 @@ Done:
 - Foundation: scaffold, dependencies, shadcn, contracts, env validation, health route, migration, seed, docs.
 - `GET /api/reports` and `PATCH /api/reports/[id]`, with Vitest setup and tests (mocked DB).
 - Dashboard scaffold: summary, filters, report list with status buttons, map placeholder, and labeled demo mode.
-- `POST /api/classify` with server-only Gemma classification, image validation, and typed errors (mocked model tests).
+- `POST /api/classify` with server-only Gemma classification, image validation, and typed errors. Mocked tests plus live verification with `gemma-4-26b-a4b-it`.
 
 Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-list.tsx`):
 - Visual design: colors, status and category styling, typography, spacing, and a desktop layout (for example, map beside the list).
@@ -514,11 +541,10 @@ Next, in priority order:
    - PATCH it back to `pending`: `resolved_at` becomes `null`.
    - PATCH a random UUID: 404.
 2. **(Aashish, in parallel) Map UI:** replace `src/components/map/map-placeholder.tsx` with a Leaflet client component that has markers and a heat layer. Feed it the `reports` array already loaded in `reports-dashboard.tsx`, which works in both demo and live mode.
-3. **(Tejas) Verify live classification. Blocked on the following from Tejas:**
-   - **A valid Gemini API key** from Google AI Studio (aistudio.google.com/apikey), on an account allowed to use Gemma. Open `.env.local` in an editor and paste the key after `GEMINI_API_KEY=`. Don't paste it into the terminal or chat, and don't commit it.
-   - **Three real photos**, each JPEG, PNG, or WebP and under 4 MB, that you're allowed to use: an obvious garbage pile, a clean street, and a blurry or ambiguous shot. Put them somewhere outside the repo (for example `~/trash-map-test/`), or in a git-ignored folder.
-   - Then, one request at a time: `npm run build && npm run start`, check `curl localhost:3000/api/health` shows `gemini: true`, and run `curl -F image=@<photo> localhost:3000/api/classify` for each photo. Expect `garbage` (with category, severity, confidence, and description), then `not_garbage`, then `uncertain` or `unclear_category`.
-   - If the response is 502 "cannot read images" or "model was not found", record it and switch `GEMINI_MODEL` to `gemma-4-31b-it`. If the server log shows the JSON-mode fallback firing, record that too. Tune the prompt or `MIN_CONFIDENCE` only after seeing real outputs.
+3. ~~(Tejas) Verify live classification~~ **Done 2026-10-11** (section J). Optional follow-ups:
+   - Try a few real phone photos from Mumbai in daylight.
+   - Decide whether construction rubble should beat `mixed` in the prompt.
+   - To re-verify on another machine, put that machine's key in its `.env.local` and repeat the curl steps in section J.
 4. **(Tejas) `POST /api/reports`:** validate the form fields and image the same way `/api/classify` does (consider moving the image checks into a shared helper), call `classifyImage()` on the server, decide per outcome (open question in section H), upload the image to `report-images/reports/<uuid>.<ext>`, insert the row with `ai_analysis` set to the validated `ClassificationResult`, and delete the uploaded object if the insert fails. Return `201 { report }`.
 5. Report form UI (photo, geolocation or map pin, submit). It can call `/api/classify` for a preview now, switching on `outcome`.
 6. Delay-weighted heat (feature 8) and complaint drafts (feature 9).
@@ -527,6 +553,19 @@ Next, in priority order:
 Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
+
+### 2026-10-11 · Live Gemini classification verified
+- **Summary:** with a real key in `.env.local` and `GEMINI_MODEL=gemma-4-26b-a4b-it`, five real photos (Wikimedia Commons, licensed) were classified through `POST /api/classify`. A garbage dump gave `garbage`/`mixed`/`medium`. A clean road and a crowd gave `not_garbage`. Construction debris gave `garbage`/`mixed`/`high`. A heavily blurred photo gave `uncertain` (0.3).
+- Also confirmed:
+  - Inline images and JSON mode both work on this model.
+  - A bad model id maps to a safe 502.
+  - Invalid inputs still return safe 4xx errors.
+  - Nothing is saved.
+  - No key appears in client bundles.
+- **Contract impact:** none. No code changes.
+- **Files:** modified `PROJECT_CONTEXT.md`. `.env.local` was updated locally and is not committed. Test photos and `SOURCES.txt` live in `~/trash-map-test/`, outside the repo.
+- **Checks:** `npm run check` (104/104, mocked) and `npm run build` passed, plus the live checks in section J.
+- **Remaining:** `POST /api/reports` (needs Supabase credentials). `unclear_category` hasn't been seen live.
 
 ### 2026-10-11 · Live Gemini verification: blocked on credentials
 - **Summary:** tried to verify real classification. No Gemini credentials were configured and the repo has no real test photos, so no live request was made. Created a git-ignored `.env.local` with `GEMINI_MODEL=gemma-4-26b-a4b-it` (from Google's current list of Gemma models on the Gemini API) and an empty key. Documented what Tejas needs to provide.
