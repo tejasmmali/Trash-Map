@@ -1,7 +1,7 @@
 # Trash Map: Project Context
 
 > The handoff document for every coding session, human or AI. Keep it accurate.
-> Last updated: 2026-10-11 (square-cell heat map on the dashboard; report submission live; branch `feat/ai-classification`, based on `feat/reports-api`).
+> Last updated: 2026-10-11 (India-focused heat map with location search on the dashboard; report submission live; branch `feat/ai-classification`, based on `feat/reports-api`).
 
 ## Rules for every coding session
 
@@ -90,9 +90,9 @@ src/
     reports/report-filters.tsx     status/category selects + refresh
     reports/report-list.tsx        report cards with status buttons and OSM link
     reports/labels.ts              display labels and date formatting (Asia/Kolkata)
-    map/report-map.tsx             client: heat-map section, mode toggle, legend; loads report-heat-map with next/dynamic (ssr: false)
-    map/report-heat-map.tsx        client-only Leaflet map: light OSM tiles + square heat cells (canvas)
-    map/map-placeholder.tsx        unused since the heat map landed; safe to delete
+    map/report-map.tsx             client: map section (heading, search, mode toggle, legend, status overlay); loads report-heat-map with next/dynamic (ssr: false)
+    map/report-heat-map.tsx        client-only Leaflet map: OSM tiles, India bounds, leaflet.heat layer, report markers with popups
+    map/map-search.tsx             client: "Search city or area in India..." (local Mumbai suggestions, Nominatim on Enter)
     classify/classify-panel.tsx    client: "Classify a photo" test panel (pick image, preview, POST /api/classify, show outcome)
   lib/
     validation/reports.ts    Zod schemas: the source of truth for shared contracts
@@ -102,8 +102,9 @@ src/
     supabase/server.ts       server-only service-role Supabase client (lazy)
     reports/repository.ts    server-only data access for reports (queries, row validation, DatabaseError)
     reports-client.ts        browser-side API calls with response validation, counts, filtering, demo status rule
-    heat-grid.ts             pure heat-map logic: report weights, square-cell grouping, colour ramp (no Leaflet)
     classify-client.ts       browser-side POST /api/classify with a pre-upload file check and response validation
+    heat-map.ts              pure map logic: India bounds, heat weights (density, delay), coordinate checks, legend levels (no Leaflet)
+    geocode.ts               browser-side Nominatim search (India only, 1 req/s, cached) + local Mumbai locality list
     demo-reports.ts          6 typed demo reports used only when the API returns 503 CONFIG_MISSING
     ai/gemini.ts             server-only lazy GoogleGenAI client + configured model id
     ai/classify-image.ts     server-only prompt, model call, output validation, outcome mapping
@@ -151,9 +152,9 @@ Statuses: Not started · In progress · Implemented · Tested · Blocked. "Teste
 | 4. Classification schema validation | **Tested (live)** | All 5 real model outputs passed Zod validation and mapped to valid `ClassifyResponse` shapes. |
 | 5. Save report + image to Supabase (`POST /api/reports`) | **Tested (live)** | 32 mocked route tests, plus a live run on 2026-10-11: a garbage photo gave 201 with the row and image in Supabase, and a clean-street photo gave 422 with nothing stored (section J). |
 | Reports dashboard UI (summary, filters, list, status buttons, demo mode) | Tested (no real DB) | Verified in a browser in demo mode, and in live mode against a throwaway fake PostgREST server (section J). Client logic is unit tested. |
-| 6. Map with reports | Implemented (as heat cells) | Leaflet map on the dashboard. Reports appear as square heat cells with a hover tooltip ("3 reports"); there are no individual markers or popups yet. Verified in a browser with the 25 live reports (section J). |
-| 7. Density heat map | **Tested** | "All reports" mode. Unit tests for the grouping and colours, plus a browser check. |
-| 8. Delay-weighted heat for unresolved reports | **Tested** | "Unresolved" mode, using the formula in section H (now implemented). Unit tests, plus a browser check. |
+| 6. Map with report markers | **Tested** | Leaflet + OSM map focused on India (Mumbai first), with keyboard-focusable markers and popups and a location search. Verified in a browser on live, demo, error, and empty data (section J). |
+| 7. Density heat map | **Tested** | `leaflet.heat`, weight 1 per report. Unit tests plus a browser check. |
+| 8. Delay-weighted heat for unresolved reports | **Tested** | Resolved reports excluded; formula in section H. Unit tests plus a browser check, including a status change. |
 | 9. Complaint drafts | Not started | Contract defined. |
 | 10. Mark as resolved | Implemented | Backend `PATCH /api/reports/[id]` plus per-card status buttons in the dashboard. Verified live against `trash-map` through the API. |
 | 11. Sample data | Implemented | See seed row above. |
@@ -388,6 +389,7 @@ Variables (see `.env.example`; real values go in `.env.local`, which git ignores
 | --- | --- | --- |
 | `NEXT_PUBLIC_SUPABASE_URL` | public, also read server-side | DB + storage |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | public | Reserved; unused in the MVP |
+| `NEXT_PUBLIC_GEOCODER_URL` | public, optional | Nominatim-compatible `/search` URL for the map search. Defaults to `https://nominatim.openstreetmap.org/search`. Lets us switch providers without code changes, as the Nominatim policy requires |
 | `SUPABASE_SERVICE_ROLE_KEY` | **server only** | DB + storage. Must be a secret key (`sb_secret_…`) or the legacy `service_role` JWT. Publishable (`sb_publishable_…`) and `anon` JWT keys are rejected as `CONFIG_MISSING`, because RLS would make them read zero rows |
 | `SUPABASE_STORAGE_BUCKET` | server | Defaults to `report-images` |
 | `GEMINI_API_KEY` | **server only** | Classification, complaint drafts |
@@ -447,17 +449,29 @@ Local Gemini configuration (Tejas's machine, 2026-10-11): `.env.local` (git-igno
 | The user's description wins over the model's | The user knows the place; the model's text is the fallback so the field is rarely empty. The model's description stays in `ai_analysis` for `garbage` | Always storing the model's description |
 | Config is checked for both Gemini and Supabase before classifying | Avoids spending a model call when the result can't be saved | Checking lazily on first use |
 
-**Delay-weighted heat (implemented in `src/lib/heat-grid.ts`):** for unresolved reports (`pending` and `in_progress`), `weight = min(1, 0.2 + days_open / 14)`, so a new report starts at 0.2 and reaches full intensity after about 11 days open. Resolved reports weigh 0 in that mode. The density mode uses weight 1 for every report. Days are measured from `created_at` to the browser's current time.
+**Heat weights (implemented in `src/lib/heat-map.ts`):**
+- **Density:** every report with valid coordinates has weight 1.
+- **Unresolved delay:** resolved reports are left out (no heat, no marker). For `pending` and `in_progress`, `weight = min(1, 0.2 + days_open / 14)`, where `days_open` runs from `created_at` to the browser's current time and is never negative. A new report starts at 0.2, and the weight is capped at 1 after about 11.2 days, so one very old report can't outweigh a cluster.
+- **Scale:** both modes use `HEAT_MAX = 3`, so the legend means the same in each. "Severe" is about 3 weight units close together: 3 reports in density mode, or 3 reports open for 2 weeks in delay mode. A single report shows as Low to Medium. `leaflet.heat` merges points within half its radius and clips each merged spot at `max`.
+- `leaflet.heat`'s own `maxZoom` option is set to the map's minimum zoom, which turns off its built-in fading at lower zooms. That keeps weights comparable at every zoom.
+- Weights are recomputed whenever the `reports` array changes: reload, filters, load more, or a status change.
 
-**Heat map design** (2026-10-11):
-- **Square cells, not `leaflet.heat`.** `leaflet.heat` only draws blurred radial blobs, so it can't produce square cells. Each cell is an `L.rectangle` drawn on one shared canvas renderer, which is cheap at the 500-report page size. `leaflet.heat` and `@types/leaflet.heat` are now unused dependencies.
-- **Cells are a fixed 14 px on screen**, with a 1 px gap. They're regrouped in projected pixel space on every zoom, so zooming in splits a hot cell into its parts.
-- **Colour:** a cell's weight sum divided by `max(hottest cell, 3)`, mapped light pink → pink → red → yellow (`HEAT_STOPS`). The floor of 3 stops a lone report from showing as a maximum hotspot.
-- **Base map:** standard OpenStreetMap tiles in grayscale, brightened and at 0.55 opacity over the white page background, matching the app's light theme. No API key and no new dependency. Opacity must use Leaflet's `opacity` option, because Leaflet writes an inline `opacity` that overrides CSS classes.
-- **Data:** the map uses the same `reports` array as the list, so it follows the status and category filters and only covers loaded reports. It fits the map to the reports once on first load and doesn't jump on later filter changes. Scroll-wheel zoom is off so the page scrolls normally; use the +/- buttons, double-click, or pinch.
+**Map and search design** (2026-10-11):
+- **India bounds:** `maxBounds` is lat 4–38, lng 64–100 with full viscosity, and the minimum zoom is 4 (all of India visible). The initial view is Mumbai (`19.076, 72.8777`), zoom 11. Wheel zoom is enabled only while the map has keyboard focus, so the page still scrolls.
+- **Tiles:** standard OpenStreetMap tiles, desaturated 50 % with a CSS class so the heat colours stand out. No API key.
+- **Markers:** small `divIcon` dots coloured by status (red pending, amber in progress, green resolved). They are keyboard-focusable and labelled with their category and status. Popups are built with DOM nodes (`textContent`), never HTML strings, because descriptions are user input.
+- **Search:** Nominatim's usage policy forbids client-side autocomplete and caps the whole app at 1 request per second. So:
+  - Typing only matches a local list of 17 Mumbai localities, with no network request.
+  - Pressing Enter sends one request with `countrycodes=in`.
+  - Requests are spaced at least 1.1 s apart, results are cached per query for the page session, and results outside India are dropped.
+  - The provider URL is configurable (`NEXT_PUBLIC_GEOCODER_URL`).
+  - A newer search aborts the previous one.
+  - Selecting a result flies to its bounding box (max zoom 15), or to the point at zoom 14.
+- **Reused from Aashish's `feature/aashish-frontend-ui` reference** (commit `4b29c8f`, not merged): the idea of a search bar plus mode toggle plus compact Low/Medium/High/Severe legend, the delay formula (identical), and the Mumbai locality coordinates. **Not taken:** the dotted world map, the world land-shape generator, the dark theme and global CSS changes, the floating control stack, the report sheets, and the dashboard rewrite.
+- `leaflet.heat` 0.2 bug workaround: its scheduled redraw isn't cancelled when the layer is removed, and the redraw throws on a removed map. React Strict Mode's mount, unmount, remount in development triggered it. The cleanup now cancels the pending frame before `map.remove()`.
 
 Assumptions:
-- Mumbai only. The map defaults to center about `19.076, 72.8777`, zoom 11.
+- Mumbai first. The map opens on about `19.076, 72.8777`, zoom 11, and can be panned and searched anywhere in India.
 - English-only UI and complaint drafts for the MVP.
 - Anyone can mark a report resolved (no auth).
 
@@ -485,11 +499,20 @@ Integration rules:
 
 ## J. Testing and known issues
 
-**Square-cell heat map verification (2026-10-11):**
-- `npm run check` passed: lint, typecheck, Vitest **166/166** across 9 files. `tests/lib/heat-grid.test.ts` has 10 tests: density and delay weights (new, 7 days, capped, resolved, future timestamps), cell grouping and boundaries including negative coordinates, zero-weight skipping, the scale floor, and the colour stops with clamping.
-- `npm run build` passed, and `/` is still statically prerendered.
-- Browser check on `next dev` with live Supabase data (25 sample reports): the map loaded with grayscale tiles on white and pink cells across Mumbai, plus one hotter cell where reports overlap near Dadar. Zooming in regrouped the cells. "Unresolved" hid resolved reports and recoloured by days open. The computed tile style was `brightness(1.12) contrast(0.7) grayscale(1)` at opacity 0.55.
-- Not checked: mobile layout and touch gestures, demo mode visually (it uses the same `reports` array), and behaviour with hundreds of reports in one area.
+**India heat map and location search verification (2026-10-11):**
+- `npm run check` passed: lint, typecheck, Vitest **179/179** across 10 files. `npm run build` passed, and `/` is still statically prerendered.
+  - `tests/lib/heat-map.test.ts` (13 tests): delay weight at 0, 7, 11.2, and 365 days, future timestamps, and resolved excluded. Density points use the reports' real coordinates. Delay mode drops resolved reports and follows status changes. Invalid coordinates (NaN, Infinity, out of range) and empty input are handled. Gradient stops match the legend.
+  - `tests/lib/geocode.test.ts` (12 tests): request parameters (`countrycodes=in`, `jsonv2`, `limit=5`), case-insensitive caching, 1.1 s request spacing, no request for very short queries, dropping malformed and non-Indian results, readable errors for 429, 5xx, non-JSON, non-array, and network failure (none cached), abort, and local locality matching.
+- Browser checks on `next dev` with live Supabase data (read-only; no report statuses were changed in the database):
+  - The map loaded with no SSR, hydration, or runtime errors after the Strict Mode fix (section H): one Leaflet container, 25 markers, loaded OSM tiles, and a painted heat canvas.
+  - Density mode showed the strongest heat over the Dadar/Mahim/Dharavi cluster. Unresolved delay showed 21 markers, none resolved, and redrew the heat.
+  - Typing "Ban" suggested "Bandra, Mumbai" with no network request, and selecting it moved the map to 19.06, 72.83 at zoom 14. Entering "Pune" showed the spinner, and one Nominatim request returned 2 Indian results in 0.8 s. Selecting the first fitted the map to Pune (18.52, 73.86).
+  - Bounds: zoom stopped at 4 with all of India visible. `setView` to London was clamped to the north-west corner of the India box, and a 20,000 px pan west didn't leave it.
+  - Empty states: resolved-only showed 4 markers in density mode and "No unresolved reports to show." in delay mode. Resolved plus construction showed "No reports to show.", matching the list.
+  - Mobile at 390 px: the search goes full width above a 356 × 286 px map, with no horizontal overflow.
+- Production build with `SUPABASE_SERVICE_ROLE_KEY` blanked (demo mode, port 3001): 6 demo markers, with the map caption saying they're demo reports. In delay mode, marking a demo report resolved removed its marker and heat point (4 points became 3; nothing was saved).
+- Production build with an unreachable Supabase host (port 3002): the map showed "Loading reports…", then "Reports could not be loaded, so the map has no data.", alongside the list's existing error card.
+- Not checked: touch gestures on a real phone, screen-reader output, and hundreds of reports in one area.
 
 **`POST /api/reports` verification (2026-10-11, branch `feat/ai-classification`): succeeded.**
 - `npm run check` passed: lint clean, typecheck clean, Vitest **156/156** across 8 files. `npm run build` passed, and `/api/reports` is dynamic.
@@ -653,9 +676,14 @@ Known issues and risks:
 - Build prints a warning about a stray `package-lock.json` in the parent home directory. It comes from the local machine, not the repo, and is harmless.
 - `npm audit` reports 5 high-severity advisories in transitive dev dependencies from the scaffold. Not triaged.
 - npm warns that install scripts for `unrs-resolver`, `protobufjs`, and `@google/genai` are not in `allowScripts`. The build works regardless.
-- `leaflet.heat` (0.2.0) is no longer used. The square-cell map draws its own cells (section H). Remove it and `@types/leaflet.heat` when convenient.
-- Heat map: OpenStreetMap's public tile servers are fine for a demo, but their usage policy forbids heavy traffic. A real deployment should switch to a tile provider or self-hosted tiles. The attribution must stay visible.
-- Heat map: fast refresh keeps the existing Leaflet map, so changes to the tile layer options need a full page reload in dev.
+- `leaflet.heat` is old (0.2.0, a global plugin that patches `L`). It's imported after `leaflet` in the client-only `report-heat-map.tsx`, which uses Leaflet's **default** import (the live object the plugin extends). See section H for the redraw bug workaround.
+- Map known limitations:
+  - OpenStreetMap's public tile servers and the public Nominatim server are fine for a demo, but both forbid heavy traffic. A real deployment should use a tile provider or self-hosted tiles, and its own geocoder (or a server-side proxy with caching). The attribution must stay visible.
+  - The map covers only the reports loaded in the list (up to 500 per page, with the list's filters), not every report in the database.
+  - Heat intensity depends on screen distance, so zooming out merges nearby reports into hotter spots. That's expected for a heat map, but the "about 3 reports" legend wording is approximate.
+  - Delay weights use the browser's clock and are recomputed when reports change, not continuously.
+  - With hundreds of reports, every marker is a focusable DOM element, which is a lot of tab stops. Consider clustering or hiding markers at low zoom.
+  - No new-report refresh hook yet, because there's no report form. When one is added, appending the returned report to the list will update the map automatically.
 - The SQL migration has not been run against Postgres, so syntax errors there would not have been caught.
 - Classification known limitations:
   - Detecting "this model can't read images" and "this model doesn't support JSON mode" relies on matching words in the provider's 400 message. Neither has been seen live, because `gemma-4-26b-a4b-it` supports both. Unmatched cases fall through to the generic 502 `AI_UNAVAILABLE`.
@@ -685,7 +713,7 @@ Done:
 
 Remaining UI work for Aashish (start with `src/components/reports/reports-dashboard.tsx` and `src/components/reports/report-list.tsx`):
 - Visual design: colors, status and category styling, typography, spacing, and a desktop layout (for example, map beside the list).
-- The heat map (features 6–8) is in `src/components/map/`. Polish it, and add report popups or markers if wanted.
+- The map, heat layers, and search (features 6–8) are in `src/components/map/`. Restyle freely. Marker clustering would help once there are many reports.
 - Show report images. `image_url` is already in every `Report`, but cards don't render it yet.
 - Optionally swap the native selects for shadcn components, and add loading skeletons and toasts.
 - Report submission form (feature 1–2 UI). `POST /api/reports` is ready (section E).
@@ -699,7 +727,7 @@ Next, in priority order:
    - PATCH a random UUID: 404.
    - Point the URL at a wrong host temporarily: expect 500 `DATABASE_ERROR` with no URL or key in the body.
    - The dashboard should show "Live data" with 25 reports.
-2. ~~Map UI~~ **Square-cell heat map done 2026-10-11** (Tejas built it at the team's request; section H). Open for Aashish: restyle freely, add clickable cells or markers with report popups, a mobile layout, and delete `map-placeholder.tsx`.
+2. ~~Map UI~~ **Done 2026-10-11:** India-focused Leaflet map with density and unresolved-delay heat, a legend, and location search (section H). Aashish's world-map reference on `feature/aashish-frontend-ui` was used for ideas only and isn't merged; decide together whether anything else from it should come over.
 3. ~~(Tejas) Verify live classification~~ **Done 2026-10-11** (section J). Optional follow-ups:
    - Try a few real phone photos from Mumbai in daylight.
    - Decide whether construction rubble should beat `mixed` in the prompt.
@@ -713,15 +741,17 @@ Dependencies: features 3, 5, and 9 need credentials. Feature 8 needs feature 6.
 
 ## L. Change log
 
-### 2026-10-11 · Square-cell heat map
-- **Summary:** replaced the map placeholder with a Leaflet map. Reports are grouped into small square cells coloured light pink → red → yellow, over a light grayscale OpenStreetMap that matches the white UI. There are two modes: "All reports" (density) and "Unresolved" (heat grows with days open). It has a legend and hover tooltips.
-- **Contract impact:** none. No API, schema, AI, or Supabase changes.
+### 2026-10-11 · India heat map and location search
+- **Summary:** replaced the dashboard's map placeholder with an interactive Leaflet map on OpenStreetMap. It opens on Mumbai and is limited to India. It has a `Density | Unresolved delay` heat toggle (`leaflet.heat`), status-coloured report markers with popups, a compact Low to Severe legend, and a "Search city or area in India..." field (local Mumbai suggestions, Nominatim on Enter). Ideas were taken selectively from Aashish's world-map reference on `feature/aashish-frontend-ui`, which isn't merged. The rest of the dashboard (header, summary, classify panel, filters, list, styling) is unchanged.
+- **Contract impact:** none. No API, database, AI, or submission changes. New optional public env var `NEXT_PUBLIC_GEOCODER_URL`.
 - **Files:**
-  - New: `src/lib/heat-grid.ts`, `src/components/map/report-map.tsx`, `src/components/map/report-heat-map.tsx`, `tests/lib/heat-grid.test.ts`.
-  - Changed: `src/components/reports/reports-dashboard.tsx` (only the map import and the one JSX line).
-  - `map-placeholder.tsx` is left in place but unused. No new dependencies; `leaflet.heat` is now unused.
-- **For Aashish:** this is your area. Tejas built it because it was requested now. Restyle freely (section K item 2).
-- **Remaining:** clickable report details, mobile polish, and a production tile provider.
+  - New: `src/lib/heat-map.ts`, `src/lib/geocode.ts`, `src/components/map/report-map.tsx`, `src/components/map/report-heat-map.tsx`, `src/components/map/map-search.tsx`, `tests/lib/heat-map.test.ts`, `tests/lib/geocode.test.ts`.
+  - Changed: `src/components/reports/reports-dashboard.tsx` (the map import and the one JSX line), `.env.example`, `README.md`.
+  - Deleted: `src/components/map/map-placeholder.tsx`.
+  - No new dependencies (`leaflet` and `leaflet.heat` were already installed).
+- **Note:** the earlier square-cell heat map (commit `87832f4`) had already been reverted in the working tree before this change, and this replaces it.
+- **For Aashish:** `src/components/map/` is your area. Restyle freely.
+- **Remaining:** marker clustering, a production tile and geocoding provider, and refreshing the map after report creation once the form exists.
 
 ### 2026-10-11 · Report submission (`POST /api/reports`)
 - **Summary:** end-to-end report creation. The photo is validated, classified on the server, uploaded to `report-images/reports/<uuid>.<ext>`, and inserted as a pending, non-sample report. `not_garbage` and `uncertain` give 422 with nothing stored. Verified with 32 mocked tests and a live run, and the live test row was cleaned up (section J).

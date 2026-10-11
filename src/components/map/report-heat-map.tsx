@@ -1,107 +1,166 @@
 "use client";
 
 import "leaflet/dist/leaflet.css";
-import * as L from "leaflet";
-import { useEffect, useRef, useState } from "react";
-import { buildHeatCells, heatColor, heatScale, type HeatMode } from "@/lib/heat-grid";
-import type { Report } from "@/types/reports";
+// The default import is Leaflet's live exports object, which `leaflet.heat`
+// extends with `heatLayer`; a namespace import may be a snapshot without it.
+import L from "leaflet";
+import "leaflet.heat";
+import { useEffect, useRef } from "react";
+import { CATEGORY_LABELS, STATUS_LABELS, formatDate } from "@/components/reports/labels";
+import type { Place } from "@/lib/geocode";
+import {
+  HEAT_GRADIENT,
+  HEAT_MAX,
+  INDIA_BOUNDS,
+  INDIA_MIN_ZOOM,
+  MUMBAI_CENTER,
+  MUMBAI_ZOOM,
+  buildHeatPoints,
+  isValidCoordinate,
+  type HeatMode,
+} from "@/lib/heat-map";
+import type { Report, ReportStatus } from "@/types/reports";
 
-// Leaflet needs `window`, so this module must only be loaded through
-// `next/dynamic` with `ssr: false` (see report-map.tsx).
+// Leaflet needs `window`, so this module is only loaded through `next/dynamic`
+// with `ssr: false` (see report-map.tsx).
 
-const MUMBAI_CENTER: L.LatLngTuple = [19.076, 72.8777];
-const DEFAULT_ZOOM = 11;
-/** Cell edge in screen pixels; cells are regrouped on every zoom. */
-const CELL_PX = 14;
-const CELL_GAP_PX = 1;
+export type MapFocus = { place: Place; key: number };
 
-type Props = { reports: Report[]; mode: HeatMode };
+type Props = { reports: Report[]; mode: HeatMode; focus: MapFocus | null };
 
-export default function ReportHeatMap({ reports, mode }: Props) {
+const MARKER_COLORS: Record<ReportStatus, string> = {
+  pending: "bg-red-600",
+  in_progress: "bg-amber-500",
+  resolved: "bg-emerald-600",
+};
+
+function markerIcon(status: ReportStatus): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    html: `<span class="block size-3 rounded-full border-2 border-white shadow ${MARKER_COLORS[status]}"></span>`,
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+    popupAnchor: [0, -6],
+  });
+}
+
+/** Built with DOM nodes, never HTML strings, because descriptions are user input. */
+function popupContent(report: Report): HTMLElement {
+  const root = document.createElement("div");
+  root.className = "flex max-w-56 flex-col gap-1 font-sans text-sm";
+  const title = document.createElement("p");
+  title.className = "font-medium";
+  title.textContent = `${CATEGORY_LABELS[report.category]} · ${STATUS_LABELS[report.status]}`;
+  root.append(title);
+  if (report.description) {
+    const description = document.createElement("p");
+    description.textContent = report.description;
+    root.append(description);
+  }
+  const date = document.createElement("p");
+  date.className = "text-xs text-muted-foreground";
+  date.textContent = `Reported ${formatDate(report.created_at)}${report.is_sample ? " · Sample" : ""}`;
+  root.append(date);
+  return root;
+}
+
+export default function ReportHeatMap({ reports, mode, focus }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const cellsRef = useRef<L.LayerGroup | null>(null);
-  const fittedRef = useRef(false);
-  const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const heatRef = useRef<L.HeatLayer | null>(null);
+  const markersRef = useRef<L.LayerGroup | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     const map = L.map(container, {
       center: MUMBAI_CENTER,
-      zoom: DEFAULT_ZOOM,
-      minZoom: 9,
+      zoom: MUMBAI_ZOOM,
+      minZoom: INDIA_MIN_ZOOM,
       maxZoom: 18,
+      maxBounds: INDIA_BOUNDS,
+      maxBoundsViscosity: 1,
+      worldCopyJump: false,
       scrollWheelZoom: false,
-      renderer: L.canvas({ padding: 0.5 }),
     });
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      opacity: 0.55,
-      className: "grayscale brightness-[1.12] contrast-[0.7]",
+      className: "saturate-50",
     }).addTo(map);
-    cellsRef.current = L.layerGroup().addTo(map);
+    // Wheel zoom only while the map has focus, so the page still scrolls.
+    map.on("focus", () => map.scrollWheelZoom.enable());
+    map.on("blur", () => map.scrollWheelZoom.disable());
+
+    // `maxZoom` equal to the minimum zoom stops leaflet.heat from fading
+    // weights at lower zooms, so a weight means the same thing at every zoom.
+    heatRef.current = L.heatLayer([], {
+      radius: 22,
+      blur: 18,
+      max: HEAT_MAX,
+      maxZoom: INDIA_MIN_ZOOM,
+      minOpacity: 0.25,
+      gradient: HEAT_GRADIENT,
+    }).addTo(map);
+    markersRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
-    const onZoom = () => setZoom(map.getZoom());
-    map.on("zoomend", onZoom);
+
+    // The container can change size with the layout (e.g. mobile rotation).
+    const observer = new ResizeObserver(() => map.invalidateSize());
+    observer.observe(container);
+
     return () => {
-      map.off("zoomend", onZoom);
+      observer.disconnect();
+      // leaflet.heat 0.2 doesn't cancel its scheduled redraw on removal, and the
+      // redraw throws once the layer has no map.
+      const heat = heatRef.current as (L.HeatLayer & { _frame?: number | null }) | null;
+      if (heat?._frame) L.Util.cancelAnimFrame(heat._frame);
       map.remove();
       mapRef.current = null;
-      cellsRef.current = null;
-      fittedRef.current = false;
+      heatRef.current = null;
+      markersRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    const map = mapRef.current;
-    const group = cellsRef.current;
-    if (!map || !group) return;
+    const heat = heatRef.current;
+    const markers = markersRef.current;
+    if (!heat || !markers) return;
 
-    if (!fittedRef.current && reports.length > 0) {
-      fittedRef.current = true;
-      const bounds = L.latLngBounds(reports.map((r) => [r.latitude, r.longitude] as L.LatLngTuple));
-      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 13, animate: false });
-    }
+    heat.setLatLngs(buildHeatPoints(reports, mode, Date.now()));
 
-    const z = map.getZoom();
-    const cells = buildHeatCells(reports, {
-      mode,
-      now: Date.now(),
-      cellSize: CELL_PX,
-      project: (lat, lng) => map.project([lat, lng], z),
-    });
-    const scale = heatScale(cells);
-
-    group.clearLayers();
-    for (const cell of cells) {
-      const x = cell.col * CELL_PX;
-      const y = cell.row * CELL_PX;
-      const bounds = L.latLngBounds(
-        map.unproject([x + CELL_GAP_PX, y + CELL_GAP_PX], z),
-        map.unproject([x + CELL_PX - CELL_GAP_PX, y + CELL_PX - CELL_GAP_PX], z),
-      );
-      const reportsLabel = `${cell.count} report${cell.count === 1 ? "" : "s"}`;
-      L.rectangle(bounds, {
-        stroke: false,
-        fillColor: heatColor(cell.weight / scale),
-        fillOpacity: 0.9,
+    markers.clearLayers();
+    for (const report of reports) {
+      if (!isValidCoordinate(report.latitude, report.longitude)) continue;
+      if (mode === "delay" && report.status === "resolved") continue;
+      L.marker([report.latitude, report.longitude], {
+        icon: markerIcon(report.status),
+        title: `${CATEGORY_LABELS[report.category]} report, ${STATUS_LABELS[report.status]}`,
+        alt: `${CATEGORY_LABELS[report.category]} report, ${STATUS_LABELS[report.status]}`,
+        keyboard: true,
       })
-        .bindTooltip(mode === "unresolved" ? `${reportsLabel} open` : reportsLabel, {
-          direction: "top",
-          offset: [0, -CELL_PX / 2],
-        })
-        .addTo(group);
+        .bindPopup(() => popupContent(report))
+        .addTo(markers);
     }
-  }, [reports, mode, zoom]);
+  }, [reports, mode]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !focus) return;
+    const { place } = focus;
+    if (place.bounds) {
+      map.flyToBounds(place.bounds, { maxZoom: 15, duration: 0.8 });
+    } else {
+      map.flyTo([place.latitude, place.longitude], 14, { duration: 0.8 });
+    }
+  }, [focus]);
 
   return (
     <div
       ref={containerRef}
       role="region"
-      aria-label="Heat map of garbage reports in Mumbai"
-      className="h-full w-full bg-background! font-sans"
+      aria-label="Map of garbage reports in India. Use the arrow keys to pan and plus or minus to zoom."
+      className="z-0 h-full w-full font-sans"
     />
   );
 }

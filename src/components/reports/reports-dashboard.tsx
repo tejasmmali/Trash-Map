@@ -165,7 +165,11 @@ export function ReportsDashboard() {
 
       <ClassifyPanel />
 
-      <ReportMap reports={reports} />
+      <ReportMap
+        reports={reports}
+        state={mode === "error" ? "error" : mode === "loading" ? "loading" : "ready"}
+        demo={mode === "demo"}
+      />
 
       <section aria-labelledby="reports-heading" aria-busy={loading} className="flex flex-col gap-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
